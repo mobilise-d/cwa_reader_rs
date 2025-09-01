@@ -127,17 +127,46 @@ impl CwaDataBlock {
         self.temperature & 0x03FF
     }
     
-    /// Get accelerometer scale factor from light_scale field
-    fn get_accel_scale(&self) -> f64 {
-        let scale_bits = (self.light_scale >> 13) & 0x07; // Top 3 bits
-        1.0 / (256.0 * (1 << scale_bits) as f64) // 1/2^(8+n) g
+    /// Get calibrated temperature in Celsius (Java: temperature = (float) (((getUnsignedShort(block, 20) & 0x3ff) * 150.0 - 20500) / 1000))
+    fn get_temperature_celsius(&self) -> f32 {
+        let raw_temp = self.get_temperature_value() as f32;
+        (raw_temp * 150.0 - 20500.0) / 1000.0
     }
     
-    /// Get gyroscope scale factor from light_scale field (for AX6)
-    fn get_gyro_scale(&self) -> Option<f64> {
+    /// Get calibrated light value (Java: light = (float) Math.pow(10, (getUnsignedShort(block, 18) & 0x3ff) / 341.0))
+    fn get_light_calibrated(&self) -> f32 {
+        let raw_light = self.get_light_value() as f32;
+        10.0_f32.powf(raw_light / 341.0)
+    }
+    
+    /// Get accelerometer scale factor from light_scale field (Java: accelUnit = 1 << (8 + ((rawLight >>> 13) & 0x07)))
+    fn get_accel_unit(&self) -> i32 {
+        let scale_bits = (self.light_scale >> 13) & 0x07; // Top 3 bits
+        1 << (8 + scale_bits) // Java: accelUnit = 1 << (8 + ((rawLight >>> 13) & 0x07))
+    }
+    
+    /// Get gyroscope range and unit from light_scale field (for AX6)
+    fn get_gyro_range_and_unit(&self) -> (i32, f32) {
         let gyro_bits = (self.light_scale >> 10) & 0x07; // Bits 10-12
-        if gyro_bits > 0 {
-            Some(8000.0 / (1 << gyro_bits) as f64) // 8000/2^n dps
+        if gyro_bits != 0 {
+            let gyro_range = 8000 / (1 << gyro_bits); // Java: gyroRange = 8000 / (1 << ((rawLight >>> 10) & 0x07))
+            let gyro_unit = 32768.0 / gyro_range as f32; // Java: gyroUnit = 32768.0f / gyroRange
+            (gyro_range, gyro_unit)
+        } else {
+            (2000, 32768.0 / 2000.0) // Default values
+        }
+    }
+    
+    /// Get accelerometer scale factor (legacy method for compatibility)
+    fn get_accel_scale(&self) -> f64 {
+        1.0 / self.get_accel_unit() as f64
+    }
+    
+    /// Get gyroscope scale factor (legacy method for compatibility)
+    fn get_gyro_scale(&self) -> Option<f64> {
+        let (range, _) = self.get_gyro_range_and_unit();
+        if range > 0 {
+            Some(range as f64)
         } else {
             None
         }
@@ -165,7 +194,7 @@ impl CwaDataBlock {
     fn parse_3axis_unpacked(&self) -> Result<Vec<SampleData>, CwaError> {
         let sample_count = self.sample_count as usize;
         let bytes_per_sample = 6; // 3 axes * 2 bytes each
-        let accel_scale = self.get_accel_scale() as f32;
+        let accel_unit = self.get_accel_unit() as f32; // Java: accelUnit
         
         if self.raw_sample_data.len() < sample_count * bytes_per_sample {
             return Err("Insufficient data for unpacked 3-axis samples".into());
@@ -175,9 +204,14 @@ impl CwaDataBlock {
         
         for i in 0..sample_count {
             let offset = i * bytes_per_sample;
-            let x = i16::from_le_bytes([self.raw_sample_data[offset], self.raw_sample_data[offset + 1]]) as f32 * accel_scale;
-            let y = i16::from_le_bytes([self.raw_sample_data[offset + 2], self.raw_sample_data[offset + 3]]) as f32 * accel_scale;
-            let z = i16::from_le_bytes([self.raw_sample_data[offset + 4], self.raw_sample_data[offset + 5]]) as f32 * accel_scale;
+            let x_raw = i16::from_le_bytes([self.raw_sample_data[offset], self.raw_sample_data[offset + 1]]);
+            let y_raw = i16::from_le_bytes([self.raw_sample_data[offset + 2], self.raw_sample_data[offset + 3]]);
+            let z_raw = i16::from_le_bytes([self.raw_sample_data[offset + 4], self.raw_sample_data[offset + 5]]);
+            
+            // Java: ax = (float)sampleValues[numAxes * i + accelAxis + 0] / accelUnit;
+            let x = x_raw as f32 / accel_unit;
+            let y = y_raw as f32 / accel_unit;
+            let z = z_raw as f32 / accel_unit;
             
             samples.push(SampleData {
                 acc_x: x,
@@ -215,14 +249,31 @@ impl CwaDataBlock {
                 self.raw_sample_data[offset + 3],
             ]);
             
-            // Unpack the 32-bit value: eezzzzzz zzzzyyyy yyyyyyxx xxxxxxxx
-            let exponent = (packed >> 30) & 0x03;
-            let x = ((packed & 0x3FF) as i16) << 6 >> 6; // Sign extend 10-bit to 16-bit
-            let y = (((packed >> 10) & 0x3FF) as i16) << 6 >> 6;
-            let z = (((packed >> 20) & 0x3FF) as i16) << 6 >> 6;
+            // Java implementation: Sign-extend 10-bit value, adjust for exponent
+            // sampleValues[i * numAxes + 0] = (short)((short)(0xffffffc0 & (value <<  6)) >> (6 - ((value >> 30) & 0x03)));
+            // sampleValues[i * numAxes + 1] = (short)((short)(0xffffffc0 & (value >>  4)) >> (6 - ((value >> 30) & 0x03)));
+            // sampleValues[i * numAxes + 2] = (short)((short)(0xffffffc0 & (value >> 14)) >> (6 - ((value >> 30) & 0x03)));
             
-            // Apply exponent and scale to g units (always 1/256 g for AX3)
-            let scale = (1 << exponent) as f32 / 256.0;
+            let exponent = (packed >> 30) & 0x03;
+            let shift_amount = 6 - exponent;
+            
+            // Extract and sign-extend 10-bit values, then apply exponent shift
+            let x_raw = (packed & 0x3FF) as i16;
+            let y_raw = ((packed >> 10) & 0x3FF) as i16;
+            let z_raw = ((packed >> 20) & 0x3FF) as i16;
+            
+            // Sign extend 10-bit to 16-bit by shifting left 6, then right 6
+            let x_signed = (x_raw << 6) >> 6;
+            let y_signed = (y_raw << 6) >> 6;
+            let z_signed = (z_raw << 6) >> 6;
+            
+            // Apply exponent shift (equivalent to Java's >> (6 - exponent))
+            let x = x_signed >> shift_amount;
+            let y = y_signed >> shift_amount;
+            let z = z_signed >> shift_amount;
+            
+            // Convert to g units (1/256 g per unit)
+            let scale = 1.0 / 256.0;
             
             samples.push(SampleData {
                 acc_x: x as f32 * scale,
@@ -244,8 +295,8 @@ impl CwaDataBlock {
     fn parse_6axis_unpacked(&self) -> Result<Vec<SampleData>, CwaError> {
         let sample_count = self.sample_count as usize;
         let bytes_per_sample = 12; // 6 axes * 2 bytes each
-        let accel_scale = self.get_accel_scale() as f32;
-        let gyro_scale = self.get_gyro_scale().unwrap_or(2000.0) as f32 / 32768.0; // Default to 2000 dps range
+        let accel_unit = self.get_accel_unit() as f32; // Java: accelUnit
+        let (_, gyro_unit) = self.get_gyro_range_and_unit(); // Java: gyroUnit
         
         if self.raw_sample_data.len() < sample_count * bytes_per_sample {
             return Err("Insufficient data for unpacked 6-axis samples".into());
@@ -255,13 +306,22 @@ impl CwaDataBlock {
         
         for i in 0..sample_count {
             let offset = i * bytes_per_sample;
-            // Order: gx, gy, gz, ax, ay, az
-            let gx = i16::from_le_bytes([self.raw_sample_data[offset], self.raw_sample_data[offset + 1]]) as f32 * gyro_scale;
-            let gy = i16::from_le_bytes([self.raw_sample_data[offset + 2], self.raw_sample_data[offset + 3]]) as f32 * gyro_scale;
-            let gz = i16::from_le_bytes([self.raw_sample_data[offset + 4], self.raw_sample_data[offset + 5]]) as f32 * gyro_scale;
-            let ax = i16::from_le_bytes([self.raw_sample_data[offset + 6], self.raw_sample_data[offset + 7]]) as f32 * accel_scale;
-            let ay = i16::from_le_bytes([self.raw_sample_data[offset + 8], self.raw_sample_data[offset + 9]]) as f32 * accel_scale;
-            let az = i16::from_le_bytes([self.raw_sample_data[offset + 10], self.raw_sample_data[offset + 11]]) as f32 * accel_scale;
+            // Order: gx, gy, gz, ax, ay, az (Java: gyroAxis = 0, accelAxis = 3)
+            let gx_raw = i16::from_le_bytes([self.raw_sample_data[offset], self.raw_sample_data[offset + 1]]);
+            let gy_raw = i16::from_le_bytes([self.raw_sample_data[offset + 2], self.raw_sample_data[offset + 3]]);
+            let gz_raw = i16::from_le_bytes([self.raw_sample_data[offset + 4], self.raw_sample_data[offset + 5]]);
+            let ax_raw = i16::from_le_bytes([self.raw_sample_data[offset + 6], self.raw_sample_data[offset + 7]]);
+            let ay_raw = i16::from_le_bytes([self.raw_sample_data[offset + 8], self.raw_sample_data[offset + 9]]);
+            let az_raw = i16::from_le_bytes([self.raw_sample_data[offset + 10], self.raw_sample_data[offset + 11]]);
+            
+            // Java: gx = (float)sampleValues[numAxes * i + gyroAxis + 0] / gyroUnit;
+            // Java: ax = (float)sampleValues[numAxes * i + accelAxis + 0] / accelUnit;
+            let gx = gx_raw as f32 / gyro_unit;
+            let gy = gy_raw as f32 / gyro_unit;
+            let gz = gz_raw as f32 / gyro_unit;
+            let ax = ax_raw as f32 / accel_unit;
+            let ay = ay_raw as f32 / accel_unit;
+            let az = az_raw as f32 / accel_unit;
             
             samples.push(SampleData {
                 acc_x: ax,
@@ -403,9 +463,9 @@ pub fn read_cwa_data(file_path: &str, start_block: Option<usize>, num_blocks: Op
         // Calculate timestamps for each sample
         let timestamps = calculate_sample_timestamps(&data_block, sample_count)?;
         
-        // Extract auxiliary data
-        let temp_value = data_block.get_temperature_value() as f32;
-        let light_value = data_block.get_light_value() as f32;
+        // Extract auxiliary data (calibrated values to match Java implementation)
+        let temp_value = data_block.get_temperature_celsius(); // Java: temperature = (float) (((getUnsignedShort(block, 20) & 0x3ff) * 150.0 - 20500) / 1000)
+        let light_value = data_block.get_light_calibrated(); // Java: light = (float) Math.pow(10, (getUnsignedShort(block, 18) & 0x3ff) / 341.0)
         let battery_value = data_block.battery as f32;
         
         // Add to collections
@@ -430,31 +490,39 @@ pub fn read_cwa_data(file_path: &str, start_block: Option<usize>, num_blocks: Op
     })
 }
 
-/// Calculate timestamps for each sample in a data block
+/// Calculate timestamps for each sample in a data block (following Java implementation)
 fn calculate_sample_timestamps(data_block: &CwaDataBlock, sample_count: usize) -> Result<Vec<i64>, CwaError> {
     let block_timestamp = data_block.get_block_timestamp()
         .ok_or("Invalid block timestamp")?;
     
-    let sample_rate_hz = data_block.get_sample_rate_hz();
-    let sample_interval_microseconds = (1_000_000.0 / sample_rate_hz) as i64;
+    let freq = data_block.get_sample_rate_hz();
+    let timestamp_offset = data_block.timestamp_offset;
     
-    // Handle fractional timestamp if available
-    let base_timestamp = if data_block.has_fractional_timestamp() {
-        let fractional_seconds = data_block.get_fractional_timestamp().unwrap_or(0.0);
-        let fractional_microseconds = (fractional_seconds * 1_000_000.0) as i64;
-        block_timestamp.timestamp_micros() + fractional_microseconds
-    } else {
-        // Use timestamp offset for legacy compatibility
-        let offset_samples = data_block.timestamp_offset as i64;
-        let offset_microseconds = offset_samples * sample_interval_microseconds;
-        block_timestamp.timestamp_micros() - offset_microseconds
-    };
+    // Java implementation:
+    // offsetStart = (float) -timestampOffset / freq;
+    // blockTime += (long) Math.floor(offsetStart);
+    // offsetStart -= (float) Math.floor(offsetStart);
+    // blockStartTime = (double) blockTime + offsetStart;
+    // blockEndTime = blockStartTime + (float) sampleCount / freq;
     
-    // Generate timestamps for each sample
+    let offset_start = -(timestamp_offset as f64) / freq;
+    let block_time_seconds = block_timestamp.timestamp() as f64;
+    
+    // Fix so blockTime takes negative offset into account (for < :00 s boundaries)
+    let adjusted_block_time = block_time_seconds + offset_start.floor();
+    let adjusted_offset_start = offset_start - offset_start.floor();
+    
+    // Start and end of block
+    let block_start_time = adjusted_block_time + adjusted_offset_start;
+    let block_end_time = block_start_time + (sample_count as f64) / freq;
+    
+    // Generate timestamps for each sample (Java: t = blockStartTime + (double)i * (blockEndTime - blockStartTime) / sampleCount)
     let mut timestamps = Vec::with_capacity(sample_count);
     for i in 0..sample_count {
-        let sample_timestamp = base_timestamp + (i as i64 * sample_interval_microseconds);
-        timestamps.push(sample_timestamp);
+        let t = block_start_time + (i as f64) * (block_end_time - block_start_time) / (sample_count as f64);
+        let t_millis = t * 1000.0; // Convert to milliseconds
+        let t_micros = (t_millis * 1000.0) as i64; // Convert to microseconds for consistency
+        timestamps.push(t_micros);
     }
     
     Ok(timestamps)
