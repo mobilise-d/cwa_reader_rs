@@ -7,6 +7,25 @@ use crate::errors::CwaError;
 
 use pyo3::types::PyDict;
 
+/// Configuration options for CWA data parsing
+#[derive(Debug, Clone)]
+pub struct CwaParsingOptions {
+    pub include_magnetometer: bool,
+    pub include_temperature: bool,
+    pub include_light: bool,
+    pub include_battery: bool,
+}
+
+impl Default for CwaParsingOptions {
+    fn default() -> Self {
+        Self {
+            include_magnetometer: true,
+            include_temperature: true,
+            include_light: true,
+            include_battery: true,
+        }
+    }
+}
 
 /// CWA Data Block structure (512 bytes)
 #[derive(Debug)]
@@ -173,25 +192,25 @@ impl CwaDataBlock {
     }
     
     /// Parse samples from the data block
-    fn parse_samples(&self) -> Result<Vec<SampleData>, CwaError> {
+    fn parse_samples(&self, options: &CwaParsingOptions) -> Result<Vec<SampleData>, CwaError> {
         let num_axes = self.get_num_axes();
         let packing_format = self.get_packing_format();
         
         match (num_axes, packing_format) {
             // 3-axis accelerometer, unpacked mode (3x 16-bit signed)
-            (3, 2) => self.parse_3axis_unpacked(),
+            (3, 2) => self.parse_3axis_unpacked(options),
             // 3-axis accelerometer, packed mode (3x 10-bit + 2-bit exponent)
-            (3, 0) => self.parse_3axis_packed(),
+            (3, 0) => self.parse_3axis_packed(options),
             // 6-axis IMU (gyro + accel), unpacked mode
-            (6, 2) => self.parse_6axis_unpacked(),
+            (6, 2) => self.parse_6axis_unpacked(options),
             // 9-axis IMU (gyro + accel + mag), unpacked mode
-            (9, 2) => self.parse_9axis_unpacked(),
+            (9, 2) => self.parse_9axis_unpacked(options),
             _ => Err(format!("Unsupported sample format: {} axes, packing {}", num_axes, packing_format).into()),
         }
     }
     
     /// Parse 3-axis accelerometer data in unpacked mode
-    fn parse_3axis_unpacked(&self) -> Result<Vec<SampleData>, CwaError> {
+    fn parse_3axis_unpacked(&self, _options: &CwaParsingOptions) -> Result<Vec<SampleData>, CwaError> {
         let sample_count = self.sample_count as usize;
         let bytes_per_sample = 6; // 3 axes * 2 bytes each
         let accel_unit = self.get_accel_unit() as f32; // Java: accelUnit
@@ -220,9 +239,9 @@ impl CwaDataBlock {
                 gyro_x: 0.0,
                 gyro_y: 0.0,
                 gyro_z: 0.0,
-                mag_x: 0.0,
-                mag_y: 0.0,
-                mag_z: 0.0,
+                mag_x: None,
+                mag_y: None,
+                mag_z: None,
             });
         }
         
@@ -230,7 +249,7 @@ impl CwaDataBlock {
     }
     
     /// Parse 3-axis accelerometer data in packed mode
-    fn parse_3axis_packed(&self) -> Result<Vec<SampleData>, CwaError> {
+    fn parse_3axis_packed(&self, _options: &CwaParsingOptions) -> Result<Vec<SampleData>, CwaError> {
         let sample_count = self.sample_count as usize;
         let bytes_per_sample = 4; // 1 packed 32-bit value per sample
         
@@ -282,9 +301,9 @@ impl CwaDataBlock {
                 gyro_x: 0.0,
                 gyro_y: 0.0,
                 gyro_z: 0.0,
-                mag_x: 0.0,
-                mag_y: 0.0,
-                mag_z: 0.0,
+                mag_x: None,
+                mag_y: None,
+                mag_z: None,
             });
         }
         
@@ -292,7 +311,7 @@ impl CwaDataBlock {
     }
     
     /// Parse 6-axis IMU data (gyro + accel) in unpacked mode
-    fn parse_6axis_unpacked(&self) -> Result<Vec<SampleData>, CwaError> {
+    fn parse_6axis_unpacked(&self, _options: &CwaParsingOptions) -> Result<Vec<SampleData>, CwaError> {
         let sample_count = self.sample_count as usize;
         let bytes_per_sample = 12; // 6 axes * 2 bytes each
         let accel_unit = self.get_accel_unit() as f32; // Java: accelUnit
@@ -330,9 +349,9 @@ impl CwaDataBlock {
                 gyro_x: gx,
                 gyro_y: gy,
                 gyro_z: gz,
-                mag_x: 0.0,
-                mag_y: 0.0,
-                mag_z: 0.0,
+                mag_x: None,
+                mag_y: None,
+                mag_z: None,
             });
         }
         
@@ -340,7 +359,7 @@ impl CwaDataBlock {
     }
     
     /// Parse 9-axis IMU data (gyro + accel + mag) in unpacked mode
-    fn parse_9axis_unpacked(&self) -> Result<Vec<SampleData>, CwaError> {
+    fn parse_9axis_unpacked(&self, options: &CwaParsingOptions) -> Result<Vec<SampleData>, CwaError> {
         let sample_count = self.sample_count as usize;
         let bytes_per_sample = 18; // 9 axes * 2 bytes each
         let accel_scale = self.get_accel_scale() as f32;
@@ -373,9 +392,9 @@ impl CwaDataBlock {
                 gyro_x: gx,
                 gyro_y: gy,
                 gyro_z: gz,
-                mag_x: mx,
-                mag_y: my,
-                mag_z: mz,
+                mag_x: if options.include_magnetometer { Some(mx) } else { None },
+                mag_y: if options.include_magnetometer { Some(my) } else { None },
+                mag_z: if options.include_magnetometer { Some(mz) } else { None },
             });
         }
         
@@ -391,22 +410,27 @@ struct SampleData {
     gyro_x: f32,
     gyro_y: f32,
     gyro_z: f32,
-    mag_x: f32,
-    mag_y: f32,
-    mag_z: f32,
+    mag_x: Option<f32>,
+    mag_y: Option<f32>,
+    mag_z: Option<f32>,
 }
 
 #[derive(Debug)]
 pub struct CwaDataResult {
     pub timestamps: Vec<i64>,
     pub samples: Vec<SampleData>,
-    pub temperatures: Vec<f32>,
-    pub light_values: Vec<f32>,
-    pub battery_levels: Vec<f32>,
+    pub temperatures: Option<Vec<f32>>,
+    pub light_values: Option<Vec<f32>>,
+    pub battery_levels: Option<Vec<f32>>,
 }
 
 /// Main function to read CWA data and return structured data
-pub fn read_cwa_data(file_path: &str, start_block: Option<usize>, num_blocks: Option<usize>) -> Result<CwaDataResult, CwaError> {
+pub fn read_cwa_data(
+    file_path: &str, 
+    start_block: Option<usize>, 
+    num_blocks: Option<usize>,
+    options: Option<CwaParsingOptions>
+) -> Result<CwaDataResult, CwaError> {
     let mut file = File::open(file_path)?;
     
     // We don't need the header for data reading, just validate file format
@@ -435,12 +459,14 @@ pub fn read_cwa_data(file_path: &str, start_block: Option<usize>, num_blocks: Op
     // Seek to start block
     file.seek(SeekFrom::Start(1024 + (start_block * 512) as u64))?;
     
+    let options = options.unwrap_or_default();
+    
     // Collect all samples and timestamps
     let mut all_timestamps = Vec::new();
     let mut all_samples = Vec::new();
-    let mut all_temperatures = Vec::new();
-    let mut all_light_values = Vec::new();
-    let mut all_battery_levels = Vec::new();
+    let mut all_temperatures = if options.include_temperature { Some(Vec::new()) } else { None };
+    let mut all_light_values = if options.include_light { Some(Vec::new()) } else { None };
+    let mut all_battery_levels = if options.include_battery { Some(Vec::new()) } else { None };
     
     for _block_idx in start_block..end_block {
         let mut buffer = vec![0u8; 512];
@@ -457,7 +483,7 @@ pub fn read_cwa_data(file_path: &str, start_block: Option<usize>, num_blocks: Op
         }
         
         // Parse samples from this block
-        let samples = data_block.parse_samples()?;
+        let samples = data_block.parse_samples(&options)?;
         let sample_count = samples.len();
         
         // Calculate timestamps for each sample
@@ -471,9 +497,17 @@ pub fn read_cwa_data(file_path: &str, start_block: Option<usize>, num_blocks: Op
         // Add to collections
         all_timestamps.extend(timestamps);
         all_samples.extend(samples);
-        all_temperatures.extend(vec![temp_value; sample_count]);
-        all_light_values.extend(vec![light_value; sample_count]);
-        all_battery_levels.extend(vec![battery_value; sample_count]);
+        
+        // Only collect auxiliary data if requested
+        if let Some(ref mut temps) = all_temperatures {
+            temps.extend(vec![temp_value; sample_count]);
+        }
+        if let Some(ref mut lights) = all_light_values {
+            lights.extend(vec![light_value; sample_count]);
+        }
+        if let Some(ref mut batteries) = all_battery_levels {
+            batteries.extend(vec![battery_value; sample_count]);
+        }
     }
     
     if all_samples.is_empty() {
@@ -536,6 +570,9 @@ fn create_python_dict(py: Python, data: CwaDataResult) -> PyResult<PyObject> {
     let timestamps: Vec<i64> = data.timestamps;
     dict.set_item("timestamp", timestamps.into_pyobject(py)?)?;
     
+    // Check if magnetometer data is present before consuming samples
+    let has_mag_data = data.samples.iter().any(|s| s.mag_x.is_some());
+    
     // Extract individual arrays from samples
     let sample_count = data.samples.len();
     let mut acc_x = Vec::with_capacity(sample_count);
@@ -555,9 +592,9 @@ fn create_python_dict(py: Python, data: CwaDataResult) -> PyResult<PyObject> {
         gyro_x.push(sample.gyro_x);
         gyro_y.push(sample.gyro_y);
         gyro_z.push(sample.gyro_z);
-        mag_x.push(sample.mag_x);
-        mag_y.push(sample.mag_y);
-        mag_z.push(sample.mag_z);
+        mag_x.push(sample.mag_x.unwrap_or(0.0));
+        mag_y.push(sample.mag_y.unwrap_or(0.0));
+        mag_z.push(sample.mag_z.unwrap_or(0.0));
     }
     
     // Add all arrays to the dictionary
@@ -567,25 +604,49 @@ fn create_python_dict(py: Python, data: CwaDataResult) -> PyResult<PyObject> {
     dict.set_item("gyro_x", gyro_x.into_pyobject(py)?)?;
     dict.set_item("gyro_y", gyro_y.into_pyobject(py)?)?;
     dict.set_item("gyro_z", gyro_z.into_pyobject(py)?)?;
-    dict.set_item("mag_x", mag_x.into_pyobject(py)?)?;
-    dict.set_item("mag_y", mag_y.into_pyobject(py)?)?;
-    dict.set_item("mag_z", mag_z.into_pyobject(py)?)?;
-    dict.set_item("temperature", data.temperatures.into_pyobject(py)?)?;
-    dict.set_item("light", data.light_values.into_pyobject(py)?)?;
-    dict.set_item("battery", data.battery_levels.into_pyobject(py)?)?;
+    
+    // Only include magnetometer data if any sample has it
+    if has_mag_data {
+        dict.set_item("mag_x", mag_x.into_pyobject(py)?)?;
+        dict.set_item("mag_y", mag_y.into_pyobject(py)?)?;
+        dict.set_item("mag_z", mag_z.into_pyobject(py)?)?;
+    }
+    
+    // Only include auxiliary data if requested
+    if let Some(temperatures) = data.temperatures {
+        dict.set_item("temperature", temperatures.into_pyobject(py)?)?;
+    }
+    if let Some(light_values) = data.light_values {
+        dict.set_item("light", light_values.into_pyobject(py)?)?;
+    }
+    if let Some(battery_levels) = data.battery_levels {
+        dict.set_item("battery", battery_levels.into_pyobject(py)?)?;
+    }
     
     Ok(dict.into())
 }
 
 /// Python interface for reading CWA data
 #[pyfunction]
+#[pyo3(signature = (file_path, start_block=None, num_blocks=None, include_magnetometer=true, include_temperature=true, include_light=true, include_battery=true))]
 pub fn read_cwa_file(
     py: Python,
     file_path: &str,
     start_block: Option<usize>,
     num_blocks: Option<usize>,
+    include_magnetometer: bool,
+    include_temperature: bool,
+    include_light: bool,
+    include_battery: bool,
 ) -> PyResult<PyObject> {
-    match read_cwa_data(file_path, start_block, num_blocks) {
+    let options = CwaParsingOptions {
+        include_magnetometer,
+        include_temperature,
+        include_light,
+        include_battery,
+    };
+    
+    match read_cwa_data(file_path, start_block, num_blocks, Some(options)) {
         Ok(data) => create_python_dict(py, data),
         Err(e) => Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string())),
     }
