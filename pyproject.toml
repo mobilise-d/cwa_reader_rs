@@ -1,0 +1,25 @@
+[build-system]
+requires = ["maturin>=1.9,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "cwa_reader_rs"
+requires-python = ">=3.8"
+classifiers = [
+    "Programming Language :: Rust",
+    "Programming Language :: Python :: Implementation :: CPython",
+    "Programming Language :: Python :: Implementation :: PyPy",
+]
+dynamic = ["version"]
+
+[tool.uv]
+# Rebuild package when any rust files change
+cache-keys = [{file = "pyproject.toml"}, {file = "rust/Cargo.toml"}, {file = "**/*.rs"}]
+
+[tool.maturin]
+features = ["pyo3/extension-module"]
+
+[dependency-groups]
+dev = [
+    "pandas>=2.0.3",
+]
