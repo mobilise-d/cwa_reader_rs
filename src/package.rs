@@ -6,6 +6,7 @@ use chrono::{DateTime, Utc, TimeZone};
 use crate::errors::CwaError;
 
 use pyo3::types::PyDict;
+use numpy::IntoPyArray;
 
 /// Configuration options for CWA data parsing
 #[derive(Debug, Clone)]
@@ -29,6 +30,7 @@ impl Default for CwaParsingOptions {
 
 /// CWA Data Block structure (512 bytes)
 #[derive(Debug)]
+#[allow(dead_code)] // Some fields may be used for future functionality
 struct CwaDataBlock {
     packet_header: String,           // @ 0  +2   ASCII "AX", little-endian (0x5841)
     packet_length: u16,              // @ 2  +2   Packet length (508 bytes)
@@ -107,11 +109,6 @@ impl CwaDataBlock {
         3200.0 / ((1 << (15 - (self.sample_rate & 0x0F))) as f64)
     }
     
-    /// Get the accelerometer range in g
-    fn get_accel_range(&self) -> u8 {
-        16 >> (self.sample_rate >> 6)
-    }
-    
     /// Get the number of axes (3=Axyz, 6=Gxyz/Axyz, 9=Gxyz/Axyz/Mxyz)
     fn get_num_axes(&self) -> u8 {
         (self.num_axes_bps >> 4) & 0x0F
@@ -120,20 +117,6 @@ impl CwaDataBlock {
     /// Get the packing format (2 = 3x 16-bit signed, 0 = 3x 10-bit signed + 2-bit exponent)
     fn get_packing_format(&self) -> u8 {
         self.num_axes_bps & 0x0F
-    }
-    
-    /// Check if high-precision fractional timestamp is available
-    fn has_fractional_timestamp(&self) -> bool {
-        (self.device_fractional & 0x8000) != 0
-    }
-    
-    /// Get fractional timestamp (if available)
-    fn get_fractional_timestamp(&self) -> Option<f64> {
-        if self.has_fractional_timestamp() {
-            Some((self.device_fractional & 0x7FFF) as f64 / 32768.0)
-        } else {
-            None
-        }
     }
     
     /// Extract light sensor value
@@ -418,7 +401,16 @@ struct SampleData {
 #[derive(Debug)]
 pub struct CwaDataResult {
     pub timestamps: Vec<i64>,
-    pub samples: Vec<SampleData>,
+    // Store data in columnar format to eliminate first copy
+    pub acc_x: Vec<f32>,
+    pub acc_y: Vec<f32>,
+    pub acc_z: Vec<f32>,
+    pub gyro_x: Vec<f32>,
+    pub gyro_y: Vec<f32>,
+    pub gyro_z: Vec<f32>,
+    pub mag_x: Option<Vec<f32>>,
+    pub mag_y: Option<Vec<f32>>,
+    pub mag_z: Option<Vec<f32>>,
     pub temperatures: Option<Vec<f32>>,
     pub light_values: Option<Vec<f32>>,
     pub battery_levels: Option<Vec<f32>>,
@@ -461,9 +453,17 @@ pub fn read_cwa_data(
     
     let options = options.unwrap_or_default();
     
-    // Collect all samples and timestamps
+    // Pre-allocate columnar vectors for better performance
     let mut all_timestamps = Vec::new();
-    let mut all_samples = Vec::new();
+    let mut acc_x = Vec::new();
+    let mut acc_y = Vec::new();
+    let mut acc_z = Vec::new();
+    let mut gyro_x = Vec::new();
+    let mut gyro_y = Vec::new();
+    let mut gyro_z = Vec::new();
+    let mut mag_x = if options.include_magnetometer { Some(Vec::new()) } else { None };
+    let mut mag_y = if options.include_magnetometer { Some(Vec::new()) } else { None };
+    let mut mag_z = if options.include_magnetometer { Some(Vec::new()) } else { None };
     let mut all_temperatures = if options.include_temperature { Some(Vec::new()) } else { None };
     let mut all_light_values = if options.include_light { Some(Vec::new()) } else { None };
     let mut all_battery_levels = if options.include_battery { Some(Vec::new()) } else { None };
@@ -490,13 +490,33 @@ pub fn read_cwa_data(
         let timestamps = calculate_sample_timestamps(&data_block, sample_count)?;
         
         // Extract auxiliary data (calibrated values to match Java implementation)
-        let temp_value = data_block.get_temperature_celsius(); // Java: temperature = (float) (((getUnsignedShort(block, 20) & 0x3ff) * 150.0 - 20500) / 1000)
-        let light_value = data_block.get_light_calibrated(); // Java: light = (float) Math.pow(10, (getUnsignedShort(block, 18) & 0x3ff) / 341.0)
+        let temp_value = data_block.get_temperature_celsius();
+        let light_value = data_block.get_light_calibrated();
         let battery_value = data_block.battery as f32;
         
-        // Add to collections
+        // Add timestamps
         all_timestamps.extend(timestamps);
-        all_samples.extend(samples);
+        
+        // Directly populate columnar vectors (eliminates first copy)
+        for sample in samples {
+            acc_x.push(sample.acc_x);
+            acc_y.push(sample.acc_y);
+            acc_z.push(sample.acc_z);
+            gyro_x.push(sample.gyro_x);
+            gyro_y.push(sample.gyro_y);
+            gyro_z.push(sample.gyro_z);
+            
+            // Handle magnetometer data if requested
+            if let Some(ref mut mag_x_vec) = mag_x {
+                mag_x_vec.push(sample.mag_x.unwrap_or(0.0));
+            }
+            if let Some(ref mut mag_y_vec) = mag_y {
+                mag_y_vec.push(sample.mag_y.unwrap_or(0.0));
+            }
+            if let Some(ref mut mag_z_vec) = mag_z {
+                mag_z_vec.push(sample.mag_z.unwrap_or(0.0));
+            }
+        }
         
         // Only collect auxiliary data if requested
         if let Some(ref mut temps) = all_temperatures {
@@ -510,14 +530,22 @@ pub fn read_cwa_data(
         }
     }
     
-    if all_samples.is_empty() {
+    if acc_x.is_empty() {
         return Err("No valid sample data found in the specified range".into());
     }
     
-    // Return structured data
+    // Return structured data in columnar format
     Ok(CwaDataResult {
         timestamps: all_timestamps,
-        samples: all_samples,
+        acc_x,
+        acc_y,
+        acc_z,
+        gyro_x,
+        gyro_y,
+        gyro_z,
+        mag_x,
+        mag_y,
+        mag_z,
         temperatures: all_temperatures,
         light_values: all_light_values,
         battery_levels: all_battery_levels,
@@ -533,6 +561,7 @@ fn calculate_sample_timestamps(data_block: &CwaDataBlock, sample_count: usize) -
     let timestamp_offset = data_block.timestamp_offset;
     
     // Java implementation:
+    // https://github.com/OxWearables/actipy/blob/master/src/actipy/AxivityReader.java
     // offsetStart = (float) -timestampOffset / freq;
     // blockTime += (long) Math.floor(offsetStart);
     // offsetStart -= (float) Math.floor(offsetStart);
@@ -562,65 +591,41 @@ fn calculate_sample_timestamps(data_block: &CwaDataBlock, sample_count: usize) -
     Ok(timestamps)
 }
 
-/// Convert CwaDataResult to Python dictionary for pandas compatibility
-fn create_python_dict(py: Python, data: CwaDataResult) -> PyResult<PyObject> {
+/// Convert CwaDataResult to Python dictionary with NumPy arrays (zero-copy)
+fn create_python_dict_numpy(py: Python, data: CwaDataResult) -> PyResult<Py<PyAny>> {
     let dict = PyDict::new(py);
     
-    // Convert timestamps to Python list (microseconds since epoch)
-    let timestamps: Vec<i64> = data.timestamps;
-    dict.set_item("timestamp", timestamps.into_pyobject(py)?)?;
+    // Convert timestamps to NumPy array (zero-copy transfer)
+    dict.set_item("timestamp", data.timestamps.into_pyarray(py))?;
     
-    // Check if magnetometer data is present before consuming samples
-    let has_mag_data = data.samples.iter().any(|s| s.mag_x.is_some());
+    // Convert sensor data to NumPy arrays (zero-copy transfer)
+    dict.set_item("acc_x", data.acc_x.into_pyarray(py))?;
+    dict.set_item("acc_y", data.acc_y.into_pyarray(py))?;
+    dict.set_item("acc_z", data.acc_z.into_pyarray(py))?;
+    dict.set_item("gyro_x", data.gyro_x.into_pyarray(py))?;
+    dict.set_item("gyro_y", data.gyro_y.into_pyarray(py))?;
+    dict.set_item("gyro_z", data.gyro_z.into_pyarray(py))?;
     
-    // Extract individual arrays from samples
-    let sample_count = data.samples.len();
-    let mut acc_x = Vec::with_capacity(sample_count);
-    let mut acc_y = Vec::with_capacity(sample_count);
-    let mut acc_z = Vec::with_capacity(sample_count);
-    let mut gyro_x = Vec::with_capacity(sample_count);
-    let mut gyro_y = Vec::with_capacity(sample_count);
-    let mut gyro_z = Vec::with_capacity(sample_count);
-    let mut mag_x = Vec::with_capacity(sample_count);
-    let mut mag_y = Vec::with_capacity(sample_count);
-    let mut mag_z = Vec::with_capacity(sample_count);
-    
-    for sample in data.samples {
-        acc_x.push(sample.acc_x);
-        acc_y.push(sample.acc_y);
-        acc_z.push(sample.acc_z);
-        gyro_x.push(sample.gyro_x);
-        gyro_y.push(sample.gyro_y);
-        gyro_z.push(sample.gyro_z);
-        mag_x.push(sample.mag_x.unwrap_or(0.0));
-        mag_y.push(sample.mag_y.unwrap_or(0.0));
-        mag_z.push(sample.mag_z.unwrap_or(0.0));
+    // Only include magnetometer data if requested
+    if let Some(mag_x_data) = data.mag_x {
+        dict.set_item("mag_x", mag_x_data.into_pyarray(py))?;
     }
-    
-    // Add all arrays to the dictionary
-    dict.set_item("acc_x", acc_x.into_pyobject(py)?)?;
-    dict.set_item("acc_y", acc_y.into_pyobject(py)?)?;
-    dict.set_item("acc_z", acc_z.into_pyobject(py)?)?;
-    dict.set_item("gyro_x", gyro_x.into_pyobject(py)?)?;
-    dict.set_item("gyro_y", gyro_y.into_pyobject(py)?)?;
-    dict.set_item("gyro_z", gyro_z.into_pyobject(py)?)?;
-    
-    // Only include magnetometer data if any sample has it
-    if has_mag_data {
-        dict.set_item("mag_x", mag_x.into_pyobject(py)?)?;
-        dict.set_item("mag_y", mag_y.into_pyobject(py)?)?;
-        dict.set_item("mag_z", mag_z.into_pyobject(py)?)?;
+    if let Some(mag_y_data) = data.mag_y {
+        dict.set_item("mag_y", mag_y_data.into_pyarray(py))?;
+    }
+    if let Some(mag_z_data) = data.mag_z {
+        dict.set_item("mag_z", mag_z_data.into_pyarray(py))?;
     }
     
     // Only include auxiliary data if requested
     if let Some(temperatures) = data.temperatures {
-        dict.set_item("temperature", temperatures.into_pyobject(py)?)?;
+        dict.set_item("temperature", temperatures.into_pyarray(py))?;
     }
     if let Some(light_values) = data.light_values {
-        dict.set_item("light", light_values.into_pyobject(py)?)?;
+        dict.set_item("light", light_values.into_pyarray(py))?;
     }
     if let Some(battery_levels) = data.battery_levels {
-        dict.set_item("battery", battery_levels.into_pyobject(py)?)?;
+        dict.set_item("battery", battery_levels.into_pyarray(py))?;
     }
     
     Ok(dict.into())
@@ -638,7 +643,7 @@ pub fn read_cwa_file(
     include_temperature: bool,
     include_light: bool,
     include_battery: bool,
-) -> PyResult<PyObject> {
+) -> PyResult<Py<PyAny>> {
     let options = CwaParsingOptions {
         include_magnetometer,
         include_temperature,
@@ -647,7 +652,7 @@ pub fn read_cwa_file(
     };
     
     match read_cwa_data(file_path, start_block, num_blocks, Some(options)) {
-        Ok(data) => create_python_dict(py, data),
+        Ok(data) => create_python_dict_numpy(py, data),
         Err(e) => Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string())),
     }
 }

@@ -17,11 +17,7 @@ except Exception as e:
 # Test data reading
 try:
     print("2. Reading data (first 10 blocks)...")
-    data = read_cwa_file("/home/arne/Downloads/ax6_example_files/6014744_24031_T1_AX6_2021-08-11_00_00_00.cwa", 0, 316000, include_magnetometer=False, include_temperature=True, include_light=False, include_battery=False)
-    
-    print("Data structure:")
-    for key, values in data.items():
-        print(f"  {key}: {len(values)} values, type: {type(values[0]) if values else 'empty'}")
+    data = read_cwa_file("/home/arne/Downloads/ax6_example_files/6014744_24031_T1_AX6_2021-08-11_00_00_00.cwa",  include_magnetometer=False, include_temperature=True, include_light=False, include_battery=False)
     
     # Convert to pandas DataFrame
     print("\n3. Converting to pandas DataFrame...")

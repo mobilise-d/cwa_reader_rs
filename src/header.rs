@@ -199,45 +199,43 @@ fn read_cwa_header(file_path: &str) -> Result<CwaHeader, errors::CwaError> {
 }
 
 #[pyfunction]
-pub fn read_header(file_path: &str) -> PyResult<PyObject> {
-    Python::with_gil(|py| {
-        match read_cwa_header(file_path) {
-            Ok(header) => {
-                let header_dict = pyo3::types::PyDict::new(py);
-                
-                // Header identification
-                header_dict.set_item("packet_header", header.packet_header)?;
-                header_dict.set_item("packet_length", header.packet_length)?;
-                header_dict.set_item("hardware_type", header.hardware_type)?;
-                header_dict.set_item("device_id", header.device_id)?;
-                header_dict.set_item("session_id", header.session_id)?;
-                header_dict.set_item("upper_device_id", header.upper_device_id)?;
-                
-                // Timing configuration
-                header_dict.set_item("logging_start_time", 
-                    header.logging_start_time.map(|t| t.to_rfc3339()).unwrap_or_else(|| "None".to_string()))?;
-                header_dict.set_item("logging_end_time", 
-                    header.logging_end_time.map(|t| t.to_rfc3339()).unwrap_or_else(|| "None".to_string()))?;
-                header_dict.set_item("last_change_time", 
-                    header.last_change_time.map(|t| t.to_rfc3339()).unwrap_or_else(|| "None".to_string()))?;
-                
-                // Device configuration
-                header_dict.set_item("flash_led", header.flash_led)?;
-                header_dict.set_item("sensor_config", header.sensor_config)?;
-                header_dict.set_item("sample_rate_hz", header.sample_rate_hz)?;
-                header_dict.set_item("accel_range", header.accel_range)?;
-                header_dict.set_item("firmware_revision", header.firmware_revision)?;
-                
-                // Metadata
-                header_dict.set_item("annotation", header.annotation)?;
-                
-                // Parsed sensor configuration (for AX6)
-                header_dict.set_item("gyro_range", header.gyro_range)?;
-                header_dict.set_item("magnetometer_enabled", header.magnetometer_enabled)?;
-                
-                Ok(header_dict.into())
-            }
-            Err(e) => Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))
+pub fn read_header(py: Python, file_path: &str) -> PyResult<Py<PyAny>> {
+    match read_cwa_header(file_path) {
+        Ok(header) => {
+            let header_dict = pyo3::types::PyDict::new(py);
+            
+            // Header identification
+            header_dict.set_item("packet_header", header.packet_header)?;
+            header_dict.set_item("packet_length", header.packet_length)?;
+            header_dict.set_item("hardware_type", header.hardware_type)?;
+            header_dict.set_item("device_id", header.device_id)?;
+            header_dict.set_item("session_id", header.session_id)?;
+            header_dict.set_item("upper_device_id", header.upper_device_id)?;
+            
+            // Timing configuration
+            header_dict.set_item("logging_start_time", 
+                header.logging_start_time.map(|t| t.to_rfc3339()).unwrap_or_else(|| "None".to_string()))?;
+            header_dict.set_item("logging_end_time", 
+                header.logging_end_time.map(|t| t.to_rfc3339()).unwrap_or_else(|| "None".to_string()))?;
+            header_dict.set_item("last_change_time", 
+                header.last_change_time.map(|t| t.to_rfc3339()).unwrap_or_else(|| "None".to_string()))?;
+            
+            // Device configuration
+            header_dict.set_item("flash_led", header.flash_led)?;
+            header_dict.set_item("sensor_config", header.sensor_config)?;
+            header_dict.set_item("sample_rate_hz", header.sample_rate_hz)?;
+            header_dict.set_item("accel_range", header.accel_range)?;
+            header_dict.set_item("firmware_revision", header.firmware_revision)?;
+            
+            // Metadata
+            header_dict.set_item("annotation", header.annotation)?;
+            
+            // Parsed sensor configuration (for AX6)
+            header_dict.set_item("gyro_range", header.gyro_range)?;
+            header_dict.set_item("magnetometer_enabled", header.magnetometer_enabled)?;
+            
+            Ok(header_dict.into())
         }
-    })
+        Err(e) => Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))
+    }
 }
