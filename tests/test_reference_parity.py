@@ -59,6 +59,25 @@ def _sample_count_by_block() -> list[int]:
     return counts
 
 
+def _first_valid_block_aux() -> tuple[int, int, int]:
+    with CWA_FILE.open("rb") as fh:
+        fh.seek(1024)
+        while True:
+            block = fh.read(512)
+            if len(block) < 512:
+                break
+            if block[0:2] != b"AX":
+                continue
+            sample_rate = block[24]
+            sample_count = struct.unpack_from("<H", block, 28)[0]
+            if sample_rate == 0 or sample_count == 0:
+                continue
+            raw_temp = struct.unpack_from("<H", block, 20)[0]
+            raw_batt = block[23]
+            return raw_temp, raw_batt, sample_count
+    raise AssertionError("No valid AX data block found")
+
+
 def _rust_rows(
     start_block: int, num_blocks: int
 ) -> list[tuple[int, float, float, float]]:
@@ -128,3 +147,25 @@ def test_partial_read_matches_slice_from_full_c_reference(
     rust_rows = _rust_rows(start_block, num_blocks)
     expected = _expected_slice(start_block, num_blocks)
     _assert_rows_match(rust_rows, expected)
+
+
+def test_temperature_and_battery_match_c_export_formulas() -> None:
+    raw_temp, raw_batt, sample_count = _first_valid_block_aux()
+    expected_temp_c = (raw_temp * 75.0 / 256.0) - 50.0
+    expected_batt_v = 6.0 * (512.0 + raw_batt) / 1024.0
+
+    data = read_cwa_file(
+        str(CWA_FILE),
+        0,
+        1,
+        include_magnetometer=False,
+        include_temperature=True,
+        include_light=False,
+        include_battery=True,
+    )
+
+    assert len(data["temperature"]) == sample_count
+    assert len(data["battery"]) == sample_count
+    for i in range(sample_count):
+        assert abs(float(data["temperature"][i]) - expected_temp_c) <= 1e-6
+        assert abs(float(data["battery"][i]) - expected_batt_v) <= 1e-6

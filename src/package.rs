@@ -131,7 +131,12 @@ impl CwaDataBlock {
     /// Get calibrated temperature in Celsius (Java: temperature = (float) (((getUnsignedShort(block, 20) & 0x3ff) * 150.0 - 20500) / 1000))
     fn get_temperature_celsius(&self) -> f32 {
         let raw_temp = self.get_temperature_value() as f32;
-        (raw_temp * 150.0 - 20500.0) / 1000.0
+        (raw_temp * 75.0 / 256.0) - 50.0
+    }
+
+    /// Get battery in volts (matches cwa-convert -battv)
+    fn get_battery_voltage(&self) -> f32 {
+        6.0 * (512.0 + self.battery as f32) / 1024.0
     }
 
     /// Get calibrated light value (Java: light = (float) Math.pow(10, (getUnsignedShort(block, 18) & 0x3ff) / 341.0))
@@ -601,7 +606,7 @@ pub fn read_cwa_data(
         // Extract auxiliary data (calibrated values to match Java implementation)
         let temp_value = data_block.get_temperature_celsius();
         let light_value = data_block.get_light_calibrated();
-        let battery_value = data_block.battery as f32;
+        let battery_value = data_block.get_battery_voltage();
 
         // Add timestamps
         all_timestamps.extend(timestamps);
