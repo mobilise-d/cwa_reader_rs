@@ -1,4 +1,3 @@
-
 #[derive(Debug)]
 pub enum CwaError {
     Io(std::io::Error),
@@ -22,6 +21,12 @@ impl From<&str> for CwaError {
 impl From<String> for CwaError {
     fn from(err: String) -> Self {
         CwaError::String(err)
+    }
+}
+
+impl From<csv::Error> for CwaError {
+    fn from(err: csv::Error) -> Self {
+        CwaError::String(err.to_string())
     }
 }
 

@@ -13,3 +13,4 @@ chrono = { version = "0.4", features = ["serde"] }
 pyo3 = { version = "0.26", features = ["extension-module"] }
 serde = { version = "1.0", features = ["derive"] }
 numpy = "0.26"
+csv = "1.3"

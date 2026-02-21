@@ -1,8 +1,10 @@
 use crate::errors::CwaError;
 use chrono::{DateTime, TimeZone, Utc};
+use csv::WriterBuilder;
 use pyo3::prelude::*;
+use std::fmt::Write as _;
 use std::fs::File;
-use std::io::{Read, Seek, SeekFrom};
+use std::io::{BufWriter, Read, Seek, SeekFrom};
 
 use numpy::IntoPyArray;
 use pyo3::types::PyDict;
@@ -826,6 +828,185 @@ pub fn read_cwa_file(
             e.to_string(),
         )),
     }
+}
+
+#[pyfunction]
+#[pyo3(signature = (
+    file_path,
+    output_path,
+    start_block=None,
+    num_blocks=None,
+    include_magnetometer=false,
+    include_temperature=false,
+    include_light=false,
+    include_battery=false
+))]
+pub fn write_cwa_csv(
+    file_path: &str,
+    output_path: &str,
+    start_block: Option<usize>,
+    num_blocks: Option<usize>,
+    include_magnetometer: bool,
+    include_temperature: bool,
+    include_light: bool,
+    include_battery: bool,
+) -> PyResult<()> {
+    let options = CwaParsingOptions {
+        include_magnetometer,
+        include_temperature,
+        include_light,
+        include_battery,
+    };
+
+    write_cwa_csv_data(file_path, output_path, start_block, num_blocks, options)
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))
+}
+
+fn write_cwa_csv_data(
+    file_path: &str,
+    output_path: &str,
+    start_block: Option<usize>,
+    num_blocks: Option<usize>,
+    options: CwaParsingOptions,
+) -> Result<(), CwaError> {
+    let mut file = File::open(file_path)?;
+
+    let mut header_buffer = vec![0u8; 2];
+    file.read_exact(&mut header_buffer)?;
+    if std::str::from_utf8(&header_buffer).map_err(|_| "Invalid header")? != "MD" {
+        return Err("Not a valid CWA file".into());
+    }
+
+    file.seek(SeekFrom::Start(1024))?;
+    let file_size = file.metadata()?.len();
+    let data_size = file_size - 1024;
+    let total_blocks = (data_size / 512) as usize;
+
+    let start_block = start_block.unwrap_or(0);
+    let num_blocks = num_blocks.unwrap_or(total_blocks - start_block);
+    let end_block = std::cmp::min(start_block + num_blocks, total_blocks);
+
+    if start_block >= total_blocks {
+        return Err("Start block is beyond file size".into());
+    }
+
+    let initial_previous_packet_end = find_previous_packet_end(&mut file, start_block)?;
+    file.seek(SeekFrom::Start(1024 + (start_block * 512) as u64))?;
+
+    let output_file = File::create(output_path)?;
+    let output_buffer = BufWriter::with_capacity(16 * 1024 * 1024, output_file);
+    let mut writer = WriterBuilder::new()
+        .has_headers(false)
+        .quote_style(csv::QuoteStyle::Never)
+        .from_writer(output_buffer);
+
+    let mut header = vec![
+        "time", "acc_x", "acc_y", "acc_z", "gyro_x", "gyro_y", "gyro_z",
+    ];
+    if options.include_magnetometer {
+        header.push("mag_x");
+        header.push("mag_y");
+        header.push("mag_z");
+    }
+    if options.include_temperature {
+        header.push("temperature");
+    }
+    if options.include_light {
+        header.push("light");
+    }
+    if options.include_battery {
+        header.push("battery");
+    }
+    writer.write_record(&header)?;
+
+    let field_count = header.len();
+    let mut row_fields: Vec<String> = (0..field_count)
+        .map(|_| String::with_capacity(32))
+        .collect();
+
+    let mut previous_packet_end: Option<f64> = initial_previous_packet_end;
+    let mut buffer = [0u8; 512];
+    for _block_idx in start_block..end_block {
+        match file.read_exact(&mut buffer) {
+            Ok(_) => {}
+            Err(_) => break,
+        }
+
+        let data_block = CwaDataBlock::from_buffer(&buffer)?;
+        if data_block.sample_rate == 0 {
+            return Err("Old CWA format packets are not supported".into());
+        }
+        if data_block.sample_count == 0 {
+            continue;
+        }
+
+        let samples = data_block.parse_samples(&options)?;
+        let sample_count = samples.len();
+        let (timestamps, packet_end) = calculate_sample_timestamps_with_prev_end(
+            &data_block,
+            sample_count,
+            previous_packet_end,
+        )?;
+        previous_packet_end = Some(packet_end);
+
+        let temp_value = data_block.get_temperature_celsius();
+        let light_value = data_block.get_light_calibrated();
+        let battery_value = data_block.get_battery_voltage();
+
+        for i in 0..sample_count {
+            for field in &mut row_fields {
+                field.clear();
+            }
+
+            let sample = &samples[i];
+            let mut col = 0usize;
+
+            write!(
+                &mut row_fields[col],
+                "{:.4}",
+                timestamps[i] as f64 / 1_000_000.0
+            )
+            .unwrap();
+            col += 1;
+            write!(&mut row_fields[col], "{:.6}", sample.acc_x).unwrap();
+            col += 1;
+            write!(&mut row_fields[col], "{:.6}", sample.acc_y).unwrap();
+            col += 1;
+            write!(&mut row_fields[col], "{:.6}", sample.acc_z).unwrap();
+            col += 1;
+            write!(&mut row_fields[col], "{:.6}", sample.gyro_x).unwrap();
+            col += 1;
+            write!(&mut row_fields[col], "{:.6}", sample.gyro_y).unwrap();
+            col += 1;
+            write!(&mut row_fields[col], "{:.6}", sample.gyro_z).unwrap();
+            col += 1;
+
+            if options.include_magnetometer {
+                write!(&mut row_fields[col], "{:.6}", sample.mag_x.unwrap_or(0.0)).unwrap();
+                col += 1;
+                write!(&mut row_fields[col], "{:.6}", sample.mag_y.unwrap_or(0.0)).unwrap();
+                col += 1;
+                write!(&mut row_fields[col], "{:.6}", sample.mag_z.unwrap_or(0.0)).unwrap();
+                col += 1;
+            }
+            if options.include_temperature {
+                write!(&mut row_fields[col], "{:.6}", temp_value).unwrap();
+                col += 1;
+            }
+            if options.include_light {
+                write!(&mut row_fields[col], "{:.6}", light_value).unwrap();
+                col += 1;
+            }
+            if options.include_battery {
+                write!(&mut row_fields[col], "{:.6}", battery_value).unwrap();
+            }
+
+            writer.write_record(row_fields.iter().map(String::as_str))?;
+        }
+    }
+
+    writer.flush()?;
+    Ok(())
 }
 
 #[cfg(test)]
