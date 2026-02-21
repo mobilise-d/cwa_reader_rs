@@ -22,4 +22,5 @@ features = ["pyo3/extension-module"]
 [dependency-groups]
 dev = [
     "pandas>=2.0.3",
+    "pytest>=8.0.0",
 ]
