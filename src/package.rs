@@ -10,6 +10,8 @@ use std::io::{BufWriter, Read, Seek, SeekFrom};
 use numpy::IntoPyArray;
 use pyo3::types::PyDict;
 
+const MAX_RESAMPLE_HZ: f64 = 10_000.0;
+
 /// Configuration options for CWA data parsing
 #[derive(Debug, Clone)]
 pub struct CwaParsingOptions {
@@ -69,6 +71,9 @@ impl ResampleOptions {
     fn parse(target_hz: f64, method: &str) -> Result<Self, CwaError> {
         if !target_hz.is_finite() || target_hz <= 0.0 {
             return Err("resample_hz must be a finite value > 0".into());
+        }
+        if target_hz > MAX_RESAMPLE_HZ {
+            return Err(format!("resample_hz must be <= {MAX_RESAMPLE_HZ}").into());
         }
 
         match method {

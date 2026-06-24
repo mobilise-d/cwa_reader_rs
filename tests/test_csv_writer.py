@@ -111,3 +111,8 @@ def test_invalid_time_range_is_rejected_before_opening_file() -> None:
             range_start_time=2.0,
             range_end_time=1.0,
         )
+
+
+def test_invalid_resample_rate_is_rejected_before_opening_file() -> None:
+    with pytest.raises(ValueError, match="resample_hz"):
+        read_cwa_file("does-not-matter.cwa", resample_hz=10_001.0)
