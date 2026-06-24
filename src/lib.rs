@@ -8,6 +8,8 @@ mod package;
 #[pymodule]
 fn cwa_reader_rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(header::read_header, m)?)?;
+    m.add_function(wrap_pyfunction!(package::seconds, m)?)?;
+    m.add_function(wrap_pyfunction!(package::blocks, m)?)?;
     m.add_function(wrap_pyfunction!(package::read_cwa_file, m)?)?;
     m.add_function(wrap_pyfunction!(package::write_cwa_csv, m)?)?;
     Ok(())

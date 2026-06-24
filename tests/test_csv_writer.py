@@ -6,7 +6,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from cwa_reader_rs import read_cwa_file, write_cwa_csv
+from cwa_reader_rs import blocks, read_cwa_file, seconds, write_cwa_csv
 
 
 FIXTURE_DIR = Path(__file__).resolve().parent / "reference_data" / "openmovement"
@@ -19,8 +19,7 @@ def test_write_cwa_csv_matches_read_api_for_partial_window(tmp_path: Path) -> No
     write_cwa_csv(
         str(CWA_FILE),
         str(out_csv),
-        25,
-        7,
+        cut=blocks(25, 32),
         include_magnetometer=False,
         include_temperature=True,
         include_light=False,
@@ -30,8 +29,7 @@ def test_write_cwa_csv_matches_read_api_for_partial_window(tmp_path: Path) -> No
     written = pd.read_csv(out_csv)
     data = read_cwa_file(
         str(CWA_FILE),
-        25,
-        7,
+        cut=blocks(25, 32),
         include_magnetometer=False,
         include_temperature=True,
         include_light=False,
@@ -76,47 +74,35 @@ def test_write_cwa_csv_matches_read_api_for_partial_window(tmp_path: Path) -> No
 def test_read_resample_with_time_range_returns_regular_grid() -> None:
     source = read_cwa_file(
         str(CWA_FILE),
-        25,
-        7,
+        cut=blocks(25, 32),
         include_magnetometer=False,
         include_temperature=False,
         include_light=False,
         include_battery=False,
     )
-    start = float(source["timestamp"][20]) / 1_000_000.0
+    origin = float(read_cwa_file(str(CWA_FILE), cut=blocks(0, 1))["timestamp"][0]) / 1_000_000.0
+    start = float(source["timestamp"][20]) / 1_000_000.0 - origin
     end = start + 1.0
 
     data = read_cwa_file(
         str(CWA_FILE),
-        25,
-        7,
+        cut=seconds(start, end),
         include_magnetometer=False,
         include_temperature=False,
         include_light=False,
         include_battery=False,
         resample_hz=100.0,
-        range_start_time=start,
-        range_end_time=end,
     )
 
     assert len(data["timestamp"]) == 100
-    assert abs(float(data["timestamp"][0]) / 1_000_000.0 - start) < 1e-6
+    assert abs(float(data["timestamp"][0]) / 1_000_000.0 - (origin + start)) < 1e-6
     step = (data["timestamp"][1] - data["timestamp"][0]) / 1_000_000.0
     assert abs(float(step) - 0.01) < 1e-9
 
 
 def test_resampled_partial_read_matches_full_read_for_same_window() -> None:
-    partial_source = read_cwa_file(
-        str(CWA_FILE),
-        25,
-        7,
-        include_magnetometer=False,
-        include_temperature=True,
-        include_light=True,
-        include_battery=True,
-    )
-    start = float(partial_source["timestamp"][50]) / 1_000_000.0
-    end = float(partial_source["timestamp"][700]) / 1_000_000.0
+    start = 2.0
+    end = 5.0
 
     options = {
         "include_magnetometer": False,
@@ -124,23 +110,23 @@ def test_resampled_partial_read_matches_full_read_for_same_window() -> None:
         "include_light": True,
         "include_battery": True,
         "resample_hz": 100.0,
-        "range_start_time": start,
-        "range_end_time": end,
     }
-    full = read_cwa_file(str(CWA_FILE), 0, None, **options)
-    partial = read_cwa_file(str(CWA_FILE), 25, 7, **options)
+    full = read_cwa_file(str(CWA_FILE), **options)
+    partial = read_cwa_file(str(CWA_FILE), cut=seconds(start, end), **options)
+    start_timestamp = partial["timestamp"][0]
+    end_timestamp = start_timestamp + int((end - start) * 1_000_000)
+    full_mask = (full["timestamp"] >= start_timestamp) & (full["timestamp"] < end_timestamp)
 
     assert full.keys() == partial.keys()
     for key in full:
-        np.testing.assert_array_equal(partial[key], full[key], err_msg=key)
+        np.testing.assert_array_equal(partial[key], full[key][full_mask], err_msg=key)
 
 
-def test_invalid_time_range_is_rejected_before_opening_file() -> None:
-    with pytest.raises(ValueError, match="range_end_time"):
+def test_invalid_seconds_cut_is_rejected_before_opening_file() -> None:
+    with pytest.raises(ValueError, match="seconds end"):
         read_cwa_file(
             "does-not-matter.cwa",
-            range_start_time=2.0,
-            range_end_time=1.0,
+            cut=seconds(2.0, 1.0),
         )
 
 

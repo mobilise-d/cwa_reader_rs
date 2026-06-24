@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from cwa_reader_rs import read_cwa_file
+from cwa_reader_rs import blocks, read_cwa_file
 
 
 FIXTURE_DIR = Path(__file__).resolve().parent / "reference_data" / "openmovement"
@@ -83,8 +83,7 @@ def _rust_rows(
 ) -> list[tuple[int, float, float, float]]:
     data = read_cwa_file(
         str(CWA_FILE),
-        start_block,
-        num_blocks,
+        cut=blocks(start_block, start_block + num_blocks),
         include_magnetometer=False,
         include_temperature=False,
         include_light=False,
@@ -156,8 +155,7 @@ def test_temperature_and_battery_match_c_export_formulas() -> None:
 
     data = read_cwa_file(
         str(CWA_FILE),
-        0,
-        1,
+        cut=blocks(0, 1),
         include_magnetometer=False,
         include_temperature=True,
         include_light=False,

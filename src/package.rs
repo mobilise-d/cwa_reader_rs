@@ -63,6 +63,59 @@ impl TimeRangeOptions {
 }
 
 #[derive(Debug, Clone, Copy)]
+enum CutConfig {
+    Full,
+    Blocks {
+        start: Option<usize>,
+        end: Option<usize>,
+    },
+    Seconds {
+        start: Option<f64>,
+        end: Option<f64>,
+    },
+}
+
+impl CutConfig {
+    fn validate(&self) -> Result<(), CwaError> {
+        match self {
+            CutConfig::Full => Ok(()),
+            CutConfig::Blocks { start, end } => {
+                if let (Some(start), Some(end)) = (start, end) {
+                    if end <= start {
+                        return Err("blocks end must be greater than start".into());
+                    }
+                }
+                Ok(())
+            }
+            CutConfig::Seconds { start, end } => {
+                for value in [*start, *end].into_iter().flatten() {
+                    if !value.is_finite() {
+                        return Err("seconds cut values must be finite".into());
+                    }
+                    if value < 0.0 {
+                        return Err("seconds cut values must be >= 0".into());
+                    }
+                }
+
+                if let (Some(start), Some(end)) = (start, end) {
+                    if end <= start {
+                        return Err("seconds end must be greater than start".into());
+                    }
+                }
+                Ok(())
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ReadPlan {
+    start_block: Option<usize>,
+    num_blocks: Option<usize>,
+    time_range: TimeRangeOptions,
+}
+
+#[derive(Debug, Clone, Copy)]
 struct ResampleOptions {
     target_hz: f64,
 }
@@ -123,6 +176,198 @@ fn open_cwa_data_blocks(
     file.seek(SeekFrom::Start(1024 + (start_block * 512) as u64))?;
 
     Ok((file, start_block, end_block, previous_packet_end))
+}
+
+fn get_optional_f64(dict: &Bound<'_, PyDict>, key: &str) -> PyResult<Option<f64>> {
+    let Some(value) = dict.get_item(key)? else {
+        return Ok(None);
+    };
+    if value.is_none() {
+        Ok(None)
+    } else {
+        value.extract()
+    }
+}
+
+fn get_optional_usize(dict: &Bound<'_, PyDict>, key: &str) -> PyResult<Option<usize>> {
+    let Some(value) = dict.get_item(key)? else {
+        return Ok(None);
+    };
+    if value.is_none() {
+        Ok(None)
+    } else {
+        value.extract()
+    }
+}
+
+fn parse_cut_config(cut: Option<&Bound<'_, PyAny>>) -> PyResult<CutConfig> {
+    let Some(cut) = cut else {
+        return Ok(CutConfig::Full);
+    };
+    if cut.is_none() {
+        return Ok(CutConfig::Full);
+    }
+
+    let dict = cut.downcast::<PyDict>().map_err(|_| {
+        PyErr::new::<pyo3::exceptions::PyValueError, _>(
+            "cut must be created by seconds() or blocks()",
+        )
+    })?;
+    let kind = dict
+        .get_item("type")?
+        .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyValueError, _>("cut is missing type"))?
+        .extract::<String>()?;
+
+    let cut = match kind.as_str() {
+        "seconds" => CutConfig::Seconds {
+            start: get_optional_f64(dict, "start")?,
+            end: get_optional_f64(dict, "end")?,
+        },
+        "blocks" => CutConfig::Blocks {
+            start: get_optional_usize(dict, "start")?,
+            end: get_optional_usize(dict, "end")?,
+        },
+        _ => {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "cut type must be 'seconds' or 'blocks'",
+            ))
+        }
+    };
+
+    cut.validate()
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+    Ok(cut)
+}
+
+fn cut_to_block_range(cut: CutConfig) -> Result<(Option<usize>, Option<usize>), CwaError> {
+    match cut {
+        CutConfig::Full => Ok((None, None)),
+        CutConfig::Blocks { start, end } => {
+            let start_block = start.unwrap_or(0);
+            let num_blocks = end.map(|end| end - start_block);
+            Ok((Some(start_block), num_blocks))
+        }
+        CutConfig::Seconds { .. } => Err("seconds cut must be resolved with file metadata".into()),
+    }
+}
+
+fn resolve_read_plan(file_path: &str, cut: CutConfig) -> Result<ReadPlan, CwaError> {
+    cut.validate()?;
+    match cut {
+        CutConfig::Full | CutConfig::Blocks { .. } => {
+            let (start_block, num_blocks) = cut_to_block_range(cut)?;
+            Ok(ReadPlan {
+                start_block,
+                num_blocks,
+                time_range: TimeRangeOptions {
+                    start_time_seconds: None,
+                    end_time_seconds: None,
+                },
+            })
+        }
+        CutConfig::Seconds { start, end } => resolve_seconds_read_plan(file_path, start, end),
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct BlockTimeSpan {
+    index: usize,
+    start_seconds: f64,
+    end_seconds: f64,
+}
+
+fn resolve_seconds_read_plan(
+    file_path: &str,
+    start_seconds: Option<f64>,
+    end_seconds: Option<f64>,
+) -> Result<ReadPlan, CwaError> {
+    let mut file = File::open(file_path)?;
+
+    let mut header = [0u8; 2];
+    file.read_exact(&mut header)?;
+    if header != *b"MD" {
+        return Err("Not a valid CWA file".into());
+    }
+
+    let file_size = file.metadata()?.len();
+    let (start_block, end_block) = resolve_block_range(file_size, None, None)?;
+    file.seek(SeekFrom::Start(1024 + (start_block * 512) as u64))?;
+
+    let mut spans = Vec::new();
+    let mut previous_packet_end = None;
+    let mut first_sample_time = None;
+    let mut buffer = [0u8; 512];
+
+    for block_index in start_block..end_block {
+        match file.read_exact(&mut buffer) {
+            Ok(_) => {}
+            Err(_) => break,
+        }
+
+        let block = match CwaDataBlock::from_buffer(&buffer) {
+            Ok(block) => block,
+            Err(_) => continue,
+        };
+        if block.sample_count == 0 {
+            continue;
+        }
+        if block.sample_rate == 0 {
+            return Err("Old CWA format packets are not supported".into());
+        }
+        if block.get_block_timestamp().is_none() {
+            continue;
+        }
+
+        let (natural_start, natural_end) =
+            natural_packet_bounds(&block, block.sample_count as usize)?;
+        let mut adjusted_start = natural_start;
+        if let Some(last_end) = previous_packet_end {
+            if adjusted_start - last_end < 1.0 {
+                adjusted_start = last_end;
+            }
+        }
+        previous_packet_end = Some(natural_end);
+        first_sample_time.get_or_insert(adjusted_start);
+        spans.push(BlockTimeSpan {
+            index: block_index,
+            start_seconds: adjusted_start,
+            end_seconds: natural_end,
+        });
+    }
+
+    let origin = first_sample_time.ok_or("No valid sample data found")?;
+    let absolute_start = start_seconds.map(|start| origin + start);
+    let absolute_end = end_seconds.map(|end| origin + end);
+
+    let mut first_idx = None;
+    let mut last_idx = None;
+    for (span_idx, span) in spans.iter().enumerate() {
+        if absolute_start.is_some_and(|start| span.end_seconds <= start) {
+            continue;
+        }
+        if absolute_end.is_some_and(|end| span.start_seconds >= end) {
+            break;
+        }
+        first_idx.get_or_insert(span_idx);
+        last_idx = Some(span_idx);
+    }
+
+    let first_idx = first_idx.ok_or("No samples remain after applying seconds cut")?;
+    let last_idx = last_idx.expect("last index exists when first index exists");
+    let padded_first_idx = first_idx.saturating_sub(1);
+    let padded_last_idx = std::cmp::min(last_idx + 1, spans.len() - 1);
+
+    let start_block = spans[padded_first_idx].index;
+    let end_block = spans[padded_last_idx].index + 1;
+
+    Ok(ReadPlan {
+        start_block: Some(start_block),
+        num_blocks: Some(end_block - start_block),
+        time_range: TimeRangeOptions {
+            start_time_seconds: absolute_start,
+            end_time_seconds: absolute_end,
+        },
+    })
 }
 
 /// CWA Data Block structure (512 bytes)
@@ -1488,20 +1733,6 @@ fn write_data_result_csv(
     Ok(())
 }
 
-fn parse_time_range_options(
-    range_start_time: Option<f64>,
-    range_end_time: Option<f64>,
-) -> PyResult<TimeRangeOptions> {
-    let range = TimeRangeOptions {
-        start_time_seconds: range_start_time,
-        end_time_seconds: range_end_time,
-    };
-    range
-        .validate()
-        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
-    Ok(range)
-}
-
 fn parse_resample_options(
     resample_hz: Option<f64>,
     resample_method: &str,
@@ -1515,40 +1746,61 @@ fn parse_resample_options(
     }
 }
 
+#[pyfunction]
+#[pyo3(signature = (start=None, end=None))]
+pub fn seconds(py: Python, start: Option<f64>, end: Option<f64>) -> PyResult<Py<PyAny>> {
+    let cut = CutConfig::Seconds { start, end };
+    cut.validate()
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+
+    let dict = PyDict::new(py);
+    dict.set_item("type", "seconds")?;
+    dict.set_item("start", start)?;
+    dict.set_item("end", end)?;
+    Ok(dict.into())
+}
+
+#[pyfunction]
+#[pyo3(signature = (start=None, end=None))]
+pub fn blocks(py: Python, start: Option<usize>, end: Option<usize>) -> PyResult<Py<PyAny>> {
+    let cut = CutConfig::Blocks { start, end };
+    cut.validate()
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+
+    let dict = PyDict::new(py);
+    dict.set_item("type", "blocks")?;
+    dict.set_item("start", start)?;
+    dict.set_item("end", end)?;
+    Ok(dict.into())
+}
+
 /// Python interface for reading CWA data.
 ///
 /// Optional resampling parameters:
 /// - `resample_hz`: when set, data is resampled onto a regular grid.
 /// - `resample_method`: currently supports `"cubic"`.
-/// - `range_start_time` / `range_end_time`: optional epoch-second window filter.
 #[pyfunction]
 #[pyo3(signature = (
     file_path,
-    start_block=None,
-    num_blocks=None,
+    cut=None,
     include_magnetometer=true,
     include_temperature=true,
     include_light=true,
     include_battery=true,
     resample_hz=None,
-    resample_method="cubic",
-    range_start_time=None,
-    range_end_time=None
+    resample_method="cubic"
 ))]
 #[allow(clippy::too_many_arguments)]
 pub fn read_cwa_file(
     py: Python,
     file_path: &str,
-    start_block: Option<usize>,
-    num_blocks: Option<usize>,
+    cut: Option<&Bound<'_, PyAny>>,
     include_magnetometer: bool,
     include_temperature: bool,
     include_light: bool,
     include_battery: bool,
     resample_hz: Option<f64>,
     resample_method: &str,
-    range_start_time: Option<f64>,
-    range_end_time: Option<f64>,
 ) -> PyResult<Py<PyAny>> {
     let options = CwaParsingOptions {
         include_magnetometer,
@@ -1557,21 +1809,23 @@ pub fn read_cwa_file(
         include_battery,
     };
 
-    let time_range = parse_time_range_options(range_start_time, range_end_time)?;
+    let cut = parse_cut_config(cut)?;
     let resample_options = parse_resample_options(resample_hz, resample_method)?;
+    let plan = resolve_read_plan(file_path, cut)
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
 
     match if let Some(resample) = resample_options {
         read_cwa_data_resampled_streaming(
             file_path,
-            start_block,
-            num_blocks,
+            plan.start_block,
+            plan.num_blocks,
             options,
             resample,
-            time_range,
+            plan.time_range,
         )
     } else {
-        read_cwa_data(file_path, start_block, num_blocks, Some(options))
-            .and_then(|data| filter_data_by_time_range(data, time_range))
+        read_cwa_data(file_path, plan.start_block, plan.num_blocks, Some(options))
+            .and_then(|data| filter_data_by_time_range(data, plan.time_range))
     } {
         Ok(data) => create_python_dict_numpy(py, data),
         Err(e) => Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
@@ -1587,31 +1841,25 @@ pub fn read_cwa_file(
 #[pyo3(signature = (
     file_path,
     output_path,
-    start_block=None,
-    num_blocks=None,
+    cut=None,
     include_magnetometer=true,
     include_temperature=false,
     include_light=false,
     include_battery=false,
     resample_hz=None,
-    resample_method="cubic",
-    range_start_time=None,
-    range_end_time=None
+    resample_method="cubic"
 ))]
 #[allow(clippy::too_many_arguments)]
 pub fn write_cwa_csv(
     file_path: &str,
     output_path: &str,
-    start_block: Option<usize>,
-    num_blocks: Option<usize>,
+    cut: Option<&Bound<'_, PyAny>>,
     include_magnetometer: bool,
     include_temperature: bool,
     include_light: bool,
     include_battery: bool,
     resample_hz: Option<f64>,
     resample_method: &str,
-    range_start_time: Option<f64>,
-    range_end_time: Option<f64>,
 ) -> PyResult<()> {
     let options = CwaParsingOptions {
         include_magnetometer,
@@ -1620,17 +1868,19 @@ pub fn write_cwa_csv(
         include_battery,
     };
 
-    let time_range = parse_time_range_options(range_start_time, range_end_time)?;
+    let cut = parse_cut_config(cut)?;
     let resample_options = parse_resample_options(resample_hz, resample_method)?;
+    let plan = resolve_read_plan(file_path, cut)
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
 
     write_cwa_csv_data(
         file_path,
         output_path,
-        start_block,
-        num_blocks,
+        plan.start_block,
+        plan.num_blocks,
         options,
         resample_options,
-        time_range,
+        plan.time_range,
     )
     .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))
 }
