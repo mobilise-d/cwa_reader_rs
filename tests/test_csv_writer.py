@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pandas as pd
+import pytest
 
 from cwa_reader_rs import read_cwa_file, write_cwa_csv
 
@@ -69,3 +70,44 @@ def test_write_cwa_csv_matches_read_api_for_partial_window(tmp_path: Path) -> No
             .__abs__()
             < 1e-6
         ).all()
+
+
+def test_read_resample_with_time_range_returns_regular_grid() -> None:
+    source = read_cwa_file(
+        str(CWA_FILE),
+        25,
+        7,
+        include_magnetometer=False,
+        include_temperature=False,
+        include_light=False,
+        include_battery=False,
+    )
+    start = float(source["timestamp"][20]) / 1_000_000.0
+    end = start + 1.0
+
+    data = read_cwa_file(
+        str(CWA_FILE),
+        25,
+        7,
+        include_magnetometer=False,
+        include_temperature=False,
+        include_light=False,
+        include_battery=False,
+        resample_hz=100.0,
+        range_start_time=start,
+        range_end_time=end,
+    )
+
+    assert len(data["timestamp"]) == 100
+    assert abs(float(data["timestamp"][0]) / 1_000_000.0 - start) < 1e-6
+    step = (data["timestamp"][1] - data["timestamp"][0]) / 1_000_000.0
+    assert abs(float(step) - 0.01) < 1e-9
+
+
+def test_invalid_time_range_is_rejected_before_opening_file() -> None:
+    with pytest.raises(ValueError, match="range_end_time"):
+        read_cwa_file(
+            "does-not-matter.cwa",
+            range_start_time=2.0,
+            range_end_time=1.0,
+        )

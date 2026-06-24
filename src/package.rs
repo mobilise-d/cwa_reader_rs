@@ -2,6 +2,7 @@ use crate::errors::CwaError;
 use chrono::{DateTime, TimeZone, Utc};
 use csv::WriterBuilder;
 use pyo3::prelude::*;
+use std::collections::VecDeque;
 use std::fmt::Write as _;
 use std::fs::File;
 use std::io::{BufWriter, Read, Seek, SeekFrom};
@@ -27,6 +28,96 @@ impl Default for CwaParsingOptions {
             include_battery: true,
         }
     }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct TimeRangeOptions {
+    start_time_seconds: Option<f64>,
+    end_time_seconds: Option<f64>,
+}
+
+impl TimeRangeOptions {
+    fn has_bounds(&self) -> bool {
+        self.start_time_seconds.is_some() || self.end_time_seconds.is_some()
+    }
+
+    fn validate(&self) -> Result<(), CwaError> {
+        for value in [self.start_time_seconds, self.end_time_seconds]
+            .into_iter()
+            .flatten()
+        {
+            if !value.is_finite() {
+                return Err("time range values must be finite".into());
+            }
+        }
+
+        if let (Some(start), Some(end)) = (self.start_time_seconds, self.end_time_seconds) {
+            if end <= start {
+                return Err("range_end_time must be greater than range_start_time".into());
+            }
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ResampleOptions {
+    target_hz: f64,
+}
+
+impl ResampleOptions {
+    fn parse(target_hz: f64, method: &str) -> Result<Self, CwaError> {
+        if !target_hz.is_finite() || target_hz <= 0.0 {
+            return Err("resample_hz must be a finite value > 0".into());
+        }
+
+        match method {
+            "cubic" => Ok(Self { target_hz }),
+            _ => Err(format!("Unsupported resample_method '{method}'. Supported: cubic").into()),
+        }
+    }
+}
+
+fn resolve_block_range(
+    file_size: u64,
+    start_block: Option<usize>,
+    num_blocks: Option<usize>,
+) -> Result<(usize, usize), CwaError> {
+    if file_size < 1024 {
+        return Err("File too small to be a valid CWA file".into());
+    }
+
+    let data_size = file_size - 1024;
+    let total_blocks = (data_size / 512) as usize;
+    let start_block = start_block.unwrap_or(0);
+    if start_block >= total_blocks {
+        return Err("Start block is beyond file size".into());
+    }
+
+    let num_blocks = num_blocks.unwrap_or(total_blocks - start_block);
+    let end_block = std::cmp::min(start_block.saturating_add(num_blocks), total_blocks);
+    Ok((start_block, end_block))
+}
+
+fn open_cwa_data_blocks(
+    file_path: &str,
+    start_block: Option<usize>,
+    num_blocks: Option<usize>,
+) -> Result<(File, usize, usize, Option<f64>), CwaError> {
+    let mut file = File::open(file_path)?;
+
+    let mut header = [0u8; 2];
+    file.read_exact(&mut header)?;
+    if header != *b"MD" {
+        return Err("Not a valid CWA file".into());
+    }
+
+    let file_size = file.metadata()?.len();
+    let (start_block, end_block) = resolve_block_range(file_size, start_block, num_blocks)?;
+    let previous_packet_end = find_previous_packet_end(&mut file, start_block)?;
+    file.seek(SeekFrom::Start(1024 + (start_block * 512) as u64))?;
+
+    Ok((file, start_block, end_block, previous_packet_end))
 }
 
 /// CWA Data Block structure (512 bytes)
@@ -93,11 +184,11 @@ impl CwaDataBlock {
 
         // Parse CWA timestamp format: (MSB) YYYYYYMM MMDDDDDh hhhhmmmm mmssssss (LSB)
         let year = ((self.timestamp >> 26) & 0x3f) as i32 + 2000;
-        let month = ((self.timestamp >> 22) & 0x0f) as u32;
-        let day = ((self.timestamp >> 17) & 0x1f) as u32;
-        let hours = ((self.timestamp >> 12) & 0x1f) as u32;
-        let mins = ((self.timestamp >> 6) & 0x3f) as u32;
-        let secs = (self.timestamp & 0x3f) as u32;
+        let month = (self.timestamp >> 22) & 0x0f;
+        let day = (self.timestamp >> 17) & 0x1f;
+        let hours = (self.timestamp >> 12) & 0x1f;
+        let mins = (self.timestamp >> 6) & 0x3f;
+        let secs = self.timestamp & 0x3f;
 
         match Utc.with_ymd_and_hms(year, month, day, hours, mins, secs) {
             chrono::LocalResult::Single(dt) => Some(dt),
@@ -495,6 +586,320 @@ pub struct CwaDataResult {
     pub battery_levels: Option<Vec<f32>>,
 }
 
+#[derive(Clone, Copy)]
+struct CsvRowValues {
+    timestamp: i64,
+    acc_x: f32,
+    acc_y: f32,
+    acc_z: f32,
+    gyro_x: f32,
+    gyro_y: f32,
+    gyro_z: f32,
+    mag_x: Option<f32>,
+    mag_y: Option<f32>,
+    mag_z: Option<f32>,
+    temperature: Option<f32>,
+    light: Option<f32>,
+    battery: Option<f32>,
+}
+
+#[derive(Clone)]
+struct TimedSample {
+    time_seconds: f64,
+    sample: SampleData,
+    temperature: f32,
+    light: f32,
+    battery: f32,
+}
+
+struct StreamingResampler {
+    options: ResampleOptions,
+    range: TimeRangeOptions,
+    samples: VecDeque<TimedSample>,
+    acc_left: usize,
+    target_start_ms: Option<f64>,
+    next_target_index: u64,
+    done: bool,
+    result: CwaDataResult,
+}
+
+impl StreamingResampler {
+    fn new(
+        parse_options: &CwaParsingOptions,
+        options: ResampleOptions,
+        range: TimeRangeOptions,
+    ) -> Result<Self, CwaError> {
+        range.validate()?;
+
+        Ok(Self {
+            options,
+            range,
+            samples: VecDeque::new(),
+            acc_left: 0,
+            target_start_ms: None,
+            next_target_index: 0,
+            done: false,
+            result: CwaDataResult {
+                timestamps: Vec::new(),
+                acc_x: Vec::new(),
+                acc_y: Vec::new(),
+                acc_z: Vec::new(),
+                gyro_x: Vec::new(),
+                gyro_y: Vec::new(),
+                gyro_z: Vec::new(),
+                mag_x: if parse_options.include_magnetometer {
+                    Some(Vec::new())
+                } else {
+                    None
+                },
+                mag_y: if parse_options.include_magnetometer {
+                    Some(Vec::new())
+                } else {
+                    None
+                },
+                mag_z: if parse_options.include_magnetometer {
+                    Some(Vec::new())
+                } else {
+                    None
+                },
+                temperatures: if parse_options.include_temperature {
+                    Some(Vec::new())
+                } else {
+                    None
+                },
+                light_values: if parse_options.include_light {
+                    Some(Vec::new())
+                } else {
+                    None
+                },
+                battery_levels: if parse_options.include_battery {
+                    Some(Vec::new())
+                } else {
+                    None
+                },
+            },
+        })
+    }
+
+    fn is_done(&self) -> bool {
+        self.done
+    }
+
+    fn into_result(mut self) -> Result<CwaDataResult, CwaError> {
+        self.emit_ready(true);
+        if self.result.timestamps.is_empty() {
+            return Err("No samples remain after applying time range/resampling".into());
+        }
+        Ok(self.result)
+    }
+
+    fn push_sample(
+        &mut self,
+        time_seconds: f64,
+        sample: &SampleData,
+        temperature: f32,
+        light: f32,
+        battery: f32,
+    ) {
+        if self.done {
+            return;
+        }
+
+        self.samples.push_back(TimedSample {
+            time_seconds,
+            sample: sample.clone(),
+            temperature,
+            light,
+            battery,
+        });
+
+        if self.target_start_ms.is_none() {
+            let mut start = time_seconds;
+            if let Some(range_start) = self.range.start_time_seconds {
+                if range_start > start {
+                    start = range_start;
+                }
+            }
+            self.target_start_ms = Some(start * 1000.0);
+            self.next_target_index = 0;
+        }
+
+        self.emit_ready(false);
+    }
+
+    fn emit_ready(&mut self, final_flush: bool) {
+        let Some(target_start_ms) = self.target_start_ms else {
+            return;
+        };
+        let step_ms = 1000.0 / self.options.target_hz;
+
+        loop {
+            let target_time = (target_start_ms + self.next_target_index as f64 * step_ms) / 1000.0;
+            if self
+                .range
+                .end_time_seconds
+                .is_some_and(|end| target_time >= end)
+            {
+                self.done = true;
+                break;
+            }
+
+            self.acc_left = self.advance_left(self.acc_left, target_time);
+            if !self.has_bracket(self.acc_left, target_time) {
+                self.prune();
+                break;
+            }
+            if !self.has_cubic_lookahead(self.acc_left, final_flush) {
+                self.prune();
+                break;
+            }
+
+            self.emit_one(target_time);
+            self.next_target_index += 1;
+            self.prune();
+        }
+    }
+
+    fn sample_time(&self, idx: usize) -> f64 {
+        self.samples[idx].time_seconds
+    }
+
+    fn advance_left(&self, mut left: usize, target_time: f64) -> usize {
+        while left + 1 < self.samples.len() && self.sample_time(left + 1) < target_time {
+            left += 1;
+        }
+        left
+    }
+
+    fn has_bracket(&self, left: usize, target_time: f64) -> bool {
+        if self.samples.len() < 2 || left + 1 >= self.samples.len() {
+            return false;
+        }
+        let x_left = self.sample_time(left);
+        let x_right = self.sample_time(left + 1);
+        target_time >= x_left && target_time <= x_right
+    }
+
+    fn has_cubic_lookahead(&self, left: usize, final_flush: bool) -> bool {
+        left == 0 || left + 2 < self.samples.len() || final_flush
+    }
+
+    fn interpolate_value<F>(&self, left: usize, target_time: f64, value_fn: F) -> f32
+    where
+        F: Fn(&TimedSample) -> f32,
+    {
+        let right = left + 1;
+
+        if left > 0 && right + 1 < self.samples.len() {
+            let x0 = self.sample_time(left - 1);
+            let x1 = self.sample_time(left);
+            let x2 = self.sample_time(right);
+            let x3 = self.sample_time(right + 1);
+            let y0 = value_fn(&self.samples[left - 1]) as f64;
+            let y1 = value_fn(&self.samples[left]) as f64;
+            let y2 = value_fn(&self.samples[right]) as f64;
+            let y3 = value_fn(&self.samples[right + 1]) as f64;
+
+            if let Some(v) = cubic_lagrange_4pt(target_time, [x0, x1, x2, x3], [y0, y1, y2, y3]) {
+                return v as f32;
+            }
+        }
+
+        let x_left = self.sample_time(left);
+        let x_right = self.sample_time(right);
+        let y_left = value_fn(&self.samples[left]) as f64;
+        let y_right = value_fn(&self.samples[right]) as f64;
+        if (x_right - x_left).abs() < 1e-12 {
+            y_left as f32
+        } else {
+            (y_left + (y_right - y_left) * ((target_time - x_left) / (x_right - x_left))) as f32
+        }
+    }
+
+    fn emit_one(&mut self, target_time: f64) {
+        let acc_left = self.acc_left;
+        let gyro_left = acc_left;
+
+        let out_acc_x = self.interpolate_value(acc_left, target_time, |s| s.sample.acc_x);
+        let out_acc_y = self.interpolate_value(acc_left, target_time, |s| s.sample.acc_y);
+        let out_acc_z = self.interpolate_value(acc_left, target_time, |s| s.sample.acc_z);
+        let out_gyro_x = self.interpolate_value(gyro_left, target_time, |s| s.sample.gyro_x);
+        let out_gyro_y = self.interpolate_value(gyro_left, target_time, |s| s.sample.gyro_y);
+        let out_gyro_z = self.interpolate_value(gyro_left, target_time, |s| s.sample.gyro_z);
+        let out_mag_x = if self.result.mag_x.is_some() {
+            Some(self.interpolate_value(acc_left, target_time, |s| s.sample.mag_x.unwrap_or(0.0)))
+        } else {
+            None
+        };
+        let out_mag_y = if self.result.mag_y.is_some() {
+            Some(self.interpolate_value(acc_left, target_time, |s| s.sample.mag_y.unwrap_or(0.0)))
+        } else {
+            None
+        };
+        let out_mag_z = if self.result.mag_z.is_some() {
+            Some(self.interpolate_value(acc_left, target_time, |s| s.sample.mag_z.unwrap_or(0.0)))
+        } else {
+            None
+        };
+        let out_temperature = if self.result.temperatures.is_some() {
+            Some(self.interpolate_value(acc_left, target_time, |s| s.temperature))
+        } else {
+            None
+        };
+        let out_light = if self.result.light_values.is_some() {
+            Some(self.interpolate_value(acc_left, target_time, |s| s.light))
+        } else {
+            None
+        };
+        let out_battery = if self.result.battery_levels.is_some() {
+            Some(self.interpolate_value(acc_left, target_time, |s| s.battery))
+        } else {
+            None
+        };
+
+        self.result
+            .timestamps
+            .push((target_time * 1_000_000.0) as i64);
+        self.result.acc_x.push(out_acc_x);
+        self.result.acc_y.push(out_acc_y);
+        self.result.acc_z.push(out_acc_z);
+        self.result.gyro_x.push(out_gyro_x);
+        self.result.gyro_y.push(out_gyro_y);
+        self.result.gyro_z.push(out_gyro_z);
+
+        if let Some(ref mut mag_x) = self.result.mag_x {
+            mag_x.push(out_mag_x.expect("mag_x computed"));
+        }
+        if let Some(ref mut mag_y) = self.result.mag_y {
+            mag_y.push(out_mag_y.expect("mag_y computed"));
+        }
+        if let Some(ref mut mag_z) = self.result.mag_z {
+            mag_z.push(out_mag_z.expect("mag_z computed"));
+        }
+
+        if let Some(ref mut temperatures) = self.result.temperatures {
+            temperatures.push(out_temperature.expect("temperature computed"));
+        }
+        if let Some(ref mut lights) = self.result.light_values {
+            lights.push(out_light.expect("light computed"));
+        }
+        if let Some(ref mut batteries) = self.result.battery_levels {
+            batteries.push(out_battery.expect("battery computed"));
+        }
+    }
+
+    fn prune(&mut self) {
+        let remove = self.acc_left.saturating_sub(1);
+        if remove == 0 {
+            return;
+        }
+        for _ in 0..remove {
+            let _ = self.samples.pop_front();
+        }
+        self.acc_left = self.acc_left.saturating_sub(remove);
+    }
+}
+
 /// Main function to read CWA data and return structured data
 pub fn read_cwa_data(
     file_path: &str,
@@ -502,35 +907,8 @@ pub fn read_cwa_data(
     num_blocks: Option<usize>,
     options: Option<CwaParsingOptions>,
 ) -> Result<CwaDataResult, CwaError> {
-    let mut file = File::open(file_path)?;
-
-    // We don't need the header for data reading, just validate file format
-    let mut header_buffer = vec![0u8; 2];
-    file.read_exact(&mut header_buffer)?;
-    if std::str::from_utf8(&header_buffer).map_err(|_| "Invalid header")? != "MD" {
-        return Err("Not a valid CWA file".into());
-    }
-
-    // Skip header (1024 bytes) and seek to first data block
-    file.seek(SeekFrom::Start(1024))?;
-
-    // Determine how many blocks to read
-    let file_size = file.metadata()?.len();
-    let data_size = file_size - 1024; // Subtract header size
-    let total_blocks = (data_size / 512) as usize; // Each data block is 512 bytes
-
-    let start_block = start_block.unwrap_or(0);
-    let num_blocks = num_blocks.unwrap_or(total_blocks - start_block);
-    let end_block = std::cmp::min(start_block + num_blocks, total_blocks);
-
-    if start_block >= total_blocks {
-        return Err("Start block is beyond file size".into());
-    }
-
-    let initial_previous_packet_end = find_previous_packet_end(&mut file, start_block)?;
-
-    // Seek to start block
-    file.seek(SeekFrom::Start(1024 + (start_block * 512) as u64))?;
+    let (mut file, start_block, end_block, initial_previous_packet_end) =
+        open_cwa_data_blocks(file_path, start_block, num_blocks)?;
 
     let options = options.unwrap_or_default();
 
@@ -574,9 +952,9 @@ pub fn read_cwa_data(
     };
 
     let mut previous_packet_end: Option<f64> = initial_previous_packet_end;
+    let mut buffer = [0u8; 512];
 
     for _block_idx in start_block..end_block {
-        let mut buffer = vec![0u8; 512];
         match file.read_exact(&mut buffer) {
             Ok(_) => {}
             Err(_) => break, // End of file
@@ -636,13 +1014,13 @@ pub fn read_cwa_data(
 
         // Only collect auxiliary data if requested
         if let Some(ref mut temps) = all_temperatures {
-            temps.extend(vec![temp_value; sample_count]);
+            temps.resize(temps.len() + sample_count, temp_value);
         }
         if let Some(ref mut lights) = all_light_values {
-            lights.extend(vec![light_value; sample_count]);
+            lights.resize(lights.len() + sample_count, light_value);
         }
         if let Some(ref mut batteries) = all_battery_levels {
-            batteries.extend(vec![battery_value; sample_count]);
+            batteries.resize(batteries.len() + sample_count, battery_value);
         }
     }
 
@@ -668,7 +1046,170 @@ pub fn read_cwa_data(
     })
 }
 
+fn read_cwa_data_resampled_streaming(
+    file_path: &str,
+    start_block: Option<usize>,
+    num_blocks: Option<usize>,
+    parse_options: CwaParsingOptions,
+    resample_options: ResampleOptions,
+    time_range: TimeRangeOptions,
+) -> Result<CwaDataResult, CwaError> {
+    let (mut file, start_block, end_block, initial_previous_packet_end) =
+        open_cwa_data_blocks(file_path, start_block, num_blocks)?;
+
+    let mut previous_packet_end: Option<f64> = initial_previous_packet_end;
+    let mut buffer = [0u8; 512];
+    let mut resampler: Option<StreamingResampler> = None;
+
+    'block_loop: for _block_idx in start_block..end_block {
+        match file.read_exact(&mut buffer) {
+            Ok(_) => {}
+            Err(_) => break,
+        }
+
+        let data_block = CwaDataBlock::from_buffer(&buffer)?;
+        if data_block.sample_rate == 0 {
+            return Err("Old CWA format packets are not supported".into());
+        }
+        if data_block.sample_count == 0 {
+            continue;
+        }
+
+        let samples = data_block.parse_samples(&parse_options)?;
+        let sample_count = samples.len();
+        let (timestamps, packet_end) = calculate_sample_timestamps_with_prev_end(
+            &data_block,
+            sample_count,
+            previous_packet_end,
+        )?;
+        previous_packet_end = Some(packet_end);
+
+        let temp_value = data_block.get_temperature_celsius();
+        let light_value = data_block.get_light_calibrated();
+        let battery_value = data_block.get_battery_voltage();
+
+        if resampler.is_none() {
+            resampler = Some(StreamingResampler::new(
+                &parse_options,
+                resample_options,
+                time_range,
+            )?);
+        }
+        let state = resampler.as_mut().expect("resampler initialized");
+
+        for i in 0..sample_count {
+            let ts_seconds = timestamps[i] as f64 / 1_000_000.0;
+            state.push_sample(
+                ts_seconds,
+                &samples[i],
+                temp_value,
+                light_value,
+                battery_value,
+            );
+            if state.is_done() {
+                break 'block_loop;
+            }
+        }
+    }
+
+    let state = resampler.ok_or("No valid sample data found in the specified range")?;
+    state.into_result()
+}
+
+fn filter_data_by_time_range(
+    data: CwaDataResult,
+    range: TimeRangeOptions,
+) -> Result<CwaDataResult, CwaError> {
+    if !range.has_bounds() {
+        return Ok(data);
+    }
+    range.validate()?;
+
+    let start = range.start_time_seconds;
+    let end = range.end_time_seconds;
+
+    let mut keep_indices = Vec::with_capacity(data.timestamps.len());
+    for (idx, ts) in data.timestamps.iter().enumerate() {
+        let ts_seconds = *ts as f64 / 1_000_000.0;
+        if start.is_some_and(|s| ts_seconds < s) {
+            continue;
+        }
+        if end.is_some_and(|e| ts_seconds >= e) {
+            continue;
+        }
+        keep_indices.push(idx);
+    }
+
+    if keep_indices.is_empty() {
+        return Err("No samples remain after applying time range".into());
+    }
+
+    let filter_f32 = |src: Vec<f32>| -> Vec<f32> { keep_indices.iter().map(|&i| src[i]).collect() };
+
+    let timestamps = keep_indices.iter().map(|&i| data.timestamps[i]).collect();
+    let acc_x = filter_f32(data.acc_x);
+    let acc_y = filter_f32(data.acc_y);
+    let acc_z = filter_f32(data.acc_z);
+    let gyro_x = filter_f32(data.gyro_x);
+    let gyro_y = filter_f32(data.gyro_y);
+    let gyro_z = filter_f32(data.gyro_z);
+
+    let mag_x = data
+        .mag_x
+        .map(|src| keep_indices.iter().map(|&i| src[i]).collect());
+    let mag_y = data
+        .mag_y
+        .map(|src| keep_indices.iter().map(|&i| src[i]).collect());
+    let mag_z = data
+        .mag_z
+        .map(|src| keep_indices.iter().map(|&i| src[i]).collect());
+    let temperatures = data
+        .temperatures
+        .map(|src| keep_indices.iter().map(|&i| src[i]).collect());
+    let light_values = data
+        .light_values
+        .map(|src| keep_indices.iter().map(|&i| src[i]).collect());
+    let battery_levels = data
+        .battery_levels
+        .map(|src| keep_indices.iter().map(|&i| src[i]).collect());
+
+    Ok(CwaDataResult {
+        timestamps,
+        acc_x,
+        acc_y,
+        acc_z,
+        gyro_x,
+        gyro_y,
+        gyro_z,
+        mag_x,
+        mag_y,
+        mag_z,
+        temperatures,
+        light_values,
+        battery_levels,
+    })
+}
+
+fn cubic_lagrange_4pt(t: f64, x: [f64; 4], y: [f64; 4]) -> Option<f64> {
+    let d0 = (x[0] - x[1]) * (x[0] - x[2]) * (x[0] - x[3]);
+    let d1 = (x[1] - x[0]) * (x[1] - x[2]) * (x[1] - x[3]);
+    let d2 = (x[2] - x[0]) * (x[2] - x[1]) * (x[2] - x[3]);
+    let d3 = (x[3] - x[0]) * (x[3] - x[1]) * (x[3] - x[2]);
+
+    if d0.abs() < 1e-12 || d1.abs() < 1e-12 || d2.abs() < 1e-12 || d3.abs() < 1e-12 {
+        return None;
+    }
+
+    let l0 = ((t - x[1]) * (t - x[2]) * (t - x[3])) / d0;
+    let l1 = ((t - x[0]) * (t - x[2]) * (t - x[3])) / d1;
+    let l2 = ((t - x[0]) * (t - x[1]) * (t - x[3])) / d2;
+    let l3 = ((t - x[0]) * (t - x[1]) * (t - x[2])) / d3;
+
+    Some(y[0] * l0 + y[1] * l1 + y[2] * l2 + y[3] * l3)
+}
+
 /// Calculate timestamps for each sample in a data block
+#[allow(dead_code)]
 fn calculate_sample_timestamps(
     data_block: &CwaDataBlock,
     sample_count: usize,
@@ -802,104 +1343,7 @@ fn create_python_dict_numpy(py: Python, data: CwaDataResult) -> PyResult<Py<PyAn
     Ok(dict.into())
 }
 
-/// Python interface for reading CWA data
-#[pyfunction]
-#[pyo3(signature = (file_path, start_block=None, num_blocks=None, include_magnetometer=true, include_temperature=true, include_light=true, include_battery=true))]
-pub fn read_cwa_file(
-    py: Python,
-    file_path: &str,
-    start_block: Option<usize>,
-    num_blocks: Option<usize>,
-    include_magnetometer: bool,
-    include_temperature: bool,
-    include_light: bool,
-    include_battery: bool,
-) -> PyResult<Py<PyAny>> {
-    let options = CwaParsingOptions {
-        include_magnetometer,
-        include_temperature,
-        include_light,
-        include_battery,
-    };
-
-    match read_cwa_data(file_path, start_block, num_blocks, Some(options)) {
-        Ok(data) => create_python_dict_numpy(py, data),
-        Err(e) => Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
-            e.to_string(),
-        )),
-    }
-}
-
-#[pyfunction]
-#[pyo3(signature = (
-    file_path,
-    output_path,
-    start_block=None,
-    num_blocks=None,
-    include_magnetometer=false,
-    include_temperature=false,
-    include_light=false,
-    include_battery=false
-))]
-pub fn write_cwa_csv(
-    file_path: &str,
-    output_path: &str,
-    start_block: Option<usize>,
-    num_blocks: Option<usize>,
-    include_magnetometer: bool,
-    include_temperature: bool,
-    include_light: bool,
-    include_battery: bool,
-) -> PyResult<()> {
-    let options = CwaParsingOptions {
-        include_magnetometer,
-        include_temperature,
-        include_light,
-        include_battery,
-    };
-
-    write_cwa_csv_data(file_path, output_path, start_block, num_blocks, options)
-        .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))
-}
-
-fn write_cwa_csv_data(
-    file_path: &str,
-    output_path: &str,
-    start_block: Option<usize>,
-    num_blocks: Option<usize>,
-    options: CwaParsingOptions,
-) -> Result<(), CwaError> {
-    let mut file = File::open(file_path)?;
-
-    let mut header_buffer = vec![0u8; 2];
-    file.read_exact(&mut header_buffer)?;
-    if std::str::from_utf8(&header_buffer).map_err(|_| "Invalid header")? != "MD" {
-        return Err("Not a valid CWA file".into());
-    }
-
-    file.seek(SeekFrom::Start(1024))?;
-    let file_size = file.metadata()?.len();
-    let data_size = file_size - 1024;
-    let total_blocks = (data_size / 512) as usize;
-
-    let start_block = start_block.unwrap_or(0);
-    let num_blocks = num_blocks.unwrap_or(total_blocks - start_block);
-    let end_block = std::cmp::min(start_block + num_blocks, total_blocks);
-
-    if start_block >= total_blocks {
-        return Err("Start block is beyond file size".into());
-    }
-
-    let initial_previous_packet_end = find_previous_packet_end(&mut file, start_block)?;
-    file.seek(SeekFrom::Start(1024 + (start_block * 512) as u64))?;
-
-    let output_file = File::create(output_path)?;
-    let output_buffer = BufWriter::with_capacity(16 * 1024 * 1024, output_file);
-    let mut writer = WriterBuilder::new()
-        .has_headers(false)
-        .quote_style(csv::QuoteStyle::Never)
-        .from_writer(output_buffer);
-
+fn csv_header(options: &CwaParsingOptions) -> Vec<&'static str> {
     let mut header = vec![
         "time", "acc_x", "acc_y", "acc_z", "gyro_x", "gyro_y", "gyro_z",
     ];
@@ -917,6 +1361,315 @@ fn write_cwa_csv_data(
     if options.include_battery {
         header.push("battery");
     }
+    header
+}
+
+fn write_csv_row<W: std::io::Write>(
+    writer: &mut csv::Writer<W>,
+    row_fields: &mut [String],
+    options: &CwaParsingOptions,
+    row: CsvRowValues,
+) -> Result<(), CwaError> {
+    for field in row_fields.iter_mut() {
+        field.clear();
+    }
+
+    let mut col = 0usize;
+    write!(
+        &mut row_fields[col],
+        "{:.4}",
+        row.timestamp as f64 / 1_000_000.0
+    )
+    .unwrap();
+    col += 1;
+    write!(&mut row_fields[col], "{:.6}", row.acc_x).unwrap();
+    col += 1;
+    write!(&mut row_fields[col], "{:.6}", row.acc_y).unwrap();
+    col += 1;
+    write!(&mut row_fields[col], "{:.6}", row.acc_z).unwrap();
+    col += 1;
+    write!(&mut row_fields[col], "{:.6}", row.gyro_x).unwrap();
+    col += 1;
+    write!(&mut row_fields[col], "{:.6}", row.gyro_y).unwrap();
+    col += 1;
+    write!(&mut row_fields[col], "{:.6}", row.gyro_z).unwrap();
+    col += 1;
+
+    if options.include_magnetometer {
+        write!(&mut row_fields[col], "{:.6}", row.mag_x.unwrap_or(0.0)).unwrap();
+        col += 1;
+        write!(&mut row_fields[col], "{:.6}", row.mag_y.unwrap_or(0.0)).unwrap();
+        col += 1;
+        write!(&mut row_fields[col], "{:.6}", row.mag_z.unwrap_or(0.0)).unwrap();
+        col += 1;
+    }
+    if options.include_temperature {
+        write!(
+            &mut row_fields[col],
+            "{:.6}",
+            row.temperature
+                .ok_or("Temperature requested but unavailable")?
+        )
+        .unwrap();
+        col += 1;
+    }
+    if options.include_light {
+        write!(
+            &mut row_fields[col],
+            "{:.6}",
+            row.light.ok_or("Light requested but unavailable")?
+        )
+        .unwrap();
+        col += 1;
+    }
+    if options.include_battery {
+        write!(
+            &mut row_fields[col],
+            "{:.6}",
+            row.battery.ok_or("Battery requested but unavailable")?
+        )
+        .unwrap();
+    }
+
+    writer.write_record(row_fields.iter().map(String::as_str))?;
+    Ok(())
+}
+
+fn write_data_result_csv(
+    output_path: &str,
+    data: &CwaDataResult,
+    options: &CwaParsingOptions,
+) -> Result<(), CwaError> {
+    let output_file = File::create(output_path)?;
+    let output_buffer = BufWriter::with_capacity(16 * 1024 * 1024, output_file);
+    let mut writer = WriterBuilder::new()
+        .has_headers(false)
+        .quote_style(csv::QuoteStyle::Never)
+        .from_writer(output_buffer);
+
+    let header = csv_header(options);
+    writer.write_record(&header)?;
+
+    let field_count = header.len();
+    let mut row_fields: Vec<String> = (0..field_count)
+        .map(|_| String::with_capacity(32))
+        .collect();
+
+    let row_count = data.timestamps.len();
+    for i in 0..row_count {
+        write_csv_row(
+            &mut writer,
+            &mut row_fields,
+            options,
+            CsvRowValues {
+                timestamp: data.timestamps[i],
+                acc_x: data.acc_x[i],
+                acc_y: data.acc_y[i],
+                acc_z: data.acc_z[i],
+                gyro_x: data.gyro_x[i],
+                gyro_y: data.gyro_y[i],
+                gyro_z: data.gyro_z[i],
+                mag_x: data.mag_x.as_ref().map(|values| values[i]),
+                mag_y: data.mag_y.as_ref().map(|values| values[i]),
+                mag_z: data.mag_z.as_ref().map(|values| values[i]),
+                temperature: data.temperatures.as_ref().map(|values| values[i]),
+                light: data.light_values.as_ref().map(|values| values[i]),
+                battery: data.battery_levels.as_ref().map(|values| values[i]),
+            },
+        )?;
+    }
+
+    writer.flush()?;
+    Ok(())
+}
+
+fn parse_time_range_options(
+    range_start_time: Option<f64>,
+    range_end_time: Option<f64>,
+) -> PyResult<TimeRangeOptions> {
+    let range = TimeRangeOptions {
+        start_time_seconds: range_start_time,
+        end_time_seconds: range_end_time,
+    };
+    range
+        .validate()
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+    Ok(range)
+}
+
+fn parse_resample_options(
+    resample_hz: Option<f64>,
+    resample_method: &str,
+) -> PyResult<Option<ResampleOptions>> {
+    match resample_hz {
+        Some(target_hz) => Ok(Some(
+            ResampleOptions::parse(target_hz, resample_method)
+                .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?,
+        )),
+        None => Ok(None),
+    }
+}
+
+/// Python interface for reading CWA data.
+///
+/// Optional resampling parameters:
+/// - `resample_hz`: when set, data is resampled onto a regular grid.
+/// - `resample_method`: currently supports `"cubic"`.
+/// - `range_start_time` / `range_end_time`: optional epoch-second window filter.
+#[pyfunction]
+#[pyo3(signature = (
+    file_path,
+    start_block=None,
+    num_blocks=None,
+    include_magnetometer=true,
+    include_temperature=true,
+    include_light=true,
+    include_battery=true,
+    resample_hz=None,
+    resample_method="cubic",
+    range_start_time=None,
+    range_end_time=None
+))]
+#[allow(clippy::too_many_arguments)]
+pub fn read_cwa_file(
+    py: Python,
+    file_path: &str,
+    start_block: Option<usize>,
+    num_blocks: Option<usize>,
+    include_magnetometer: bool,
+    include_temperature: bool,
+    include_light: bool,
+    include_battery: bool,
+    resample_hz: Option<f64>,
+    resample_method: &str,
+    range_start_time: Option<f64>,
+    range_end_time: Option<f64>,
+) -> PyResult<Py<PyAny>> {
+    let options = CwaParsingOptions {
+        include_magnetometer,
+        include_temperature,
+        include_light,
+        include_battery,
+    };
+
+    let time_range = parse_time_range_options(range_start_time, range_end_time)?;
+    let resample_options = parse_resample_options(resample_hz, resample_method)?;
+
+    match if let Some(resample) = resample_options {
+        read_cwa_data_resampled_streaming(
+            file_path,
+            start_block,
+            num_blocks,
+            options,
+            resample,
+            time_range,
+        )
+    } else {
+        read_cwa_data(file_path, start_block, num_blocks, Some(options))
+            .and_then(|data| filter_data_by_time_range(data, time_range))
+    } {
+        Ok(data) => create_python_dict_numpy(py, data),
+        Err(e) => Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+            e.to_string(),
+        )),
+    }
+}
+
+#[pyfunction]
+/// Write CWA samples directly to CSV.
+///
+/// Supports the same optional resampling and time-range controls as `read_cwa_file`.
+#[pyo3(signature = (
+    file_path,
+    output_path,
+    start_block=None,
+    num_blocks=None,
+    include_magnetometer=true,
+    include_temperature=false,
+    include_light=false,
+    include_battery=false,
+    resample_hz=None,
+    resample_method="cubic",
+    range_start_time=None,
+    range_end_time=None
+))]
+#[allow(clippy::too_many_arguments)]
+pub fn write_cwa_csv(
+    file_path: &str,
+    output_path: &str,
+    start_block: Option<usize>,
+    num_blocks: Option<usize>,
+    include_magnetometer: bool,
+    include_temperature: bool,
+    include_light: bool,
+    include_battery: bool,
+    resample_hz: Option<f64>,
+    resample_method: &str,
+    range_start_time: Option<f64>,
+    range_end_time: Option<f64>,
+) -> PyResult<()> {
+    let options = CwaParsingOptions {
+        include_magnetometer,
+        include_temperature,
+        include_light,
+        include_battery,
+    };
+
+    let time_range = parse_time_range_options(range_start_time, range_end_time)?;
+    let resample_options = parse_resample_options(resample_hz, resample_method)?;
+
+    write_cwa_csv_data(
+        file_path,
+        output_path,
+        start_block,
+        num_blocks,
+        options,
+        resample_options,
+        time_range,
+    )
+    .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))
+}
+
+fn write_cwa_csv_data(
+    file_path: &str,
+    output_path: &str,
+    start_block: Option<usize>,
+    num_blocks: Option<usize>,
+    options: CwaParsingOptions,
+    resample_options: Option<ResampleOptions>,
+    time_range: TimeRangeOptions,
+) -> Result<(), CwaError> {
+    time_range.validate()?;
+
+    if let Some(resample) = resample_options {
+        let data = read_cwa_data_resampled_streaming(
+            file_path,
+            start_block,
+            num_blocks,
+            options.clone(),
+            resample,
+            time_range,
+        )?;
+        return write_data_result_csv(output_path, &data, &options);
+    }
+
+    if time_range.has_bounds() {
+        let data = read_cwa_data(file_path, start_block, num_blocks, Some(options.clone()))?;
+        let data = filter_data_by_time_range(data, time_range)?;
+        return write_data_result_csv(output_path, &data, &options);
+    }
+
+    let (mut file, start_block, end_block, initial_previous_packet_end) =
+        open_cwa_data_blocks(file_path, start_block, num_blocks)?;
+
+    let output_file = File::create(output_path)?;
+    let output_buffer = BufWriter::with_capacity(16 * 1024 * 1024, output_file);
+    let mut writer = WriterBuilder::new()
+        .has_headers(false)
+        .quote_style(csv::QuoteStyle::Never)
+        .from_writer(output_buffer);
+
+    let header = csv_header(&options);
     writer.write_record(&header)?;
 
     let field_count = header.len();
@@ -954,54 +1707,27 @@ fn write_cwa_csv_data(
         let battery_value = data_block.get_battery_voltage();
 
         for i in 0..sample_count {
-            for field in &mut row_fields {
-                field.clear();
-            }
-
             let sample = &samples[i];
-            let mut col = 0usize;
-
-            write!(
-                &mut row_fields[col],
-                "{:.4}",
-                timestamps[i] as f64 / 1_000_000.0
-            )
-            .unwrap();
-            col += 1;
-            write!(&mut row_fields[col], "{:.6}", sample.acc_x).unwrap();
-            col += 1;
-            write!(&mut row_fields[col], "{:.6}", sample.acc_y).unwrap();
-            col += 1;
-            write!(&mut row_fields[col], "{:.6}", sample.acc_z).unwrap();
-            col += 1;
-            write!(&mut row_fields[col], "{:.6}", sample.gyro_x).unwrap();
-            col += 1;
-            write!(&mut row_fields[col], "{:.6}", sample.gyro_y).unwrap();
-            col += 1;
-            write!(&mut row_fields[col], "{:.6}", sample.gyro_z).unwrap();
-            col += 1;
-
-            if options.include_magnetometer {
-                write!(&mut row_fields[col], "{:.6}", sample.mag_x.unwrap_or(0.0)).unwrap();
-                col += 1;
-                write!(&mut row_fields[col], "{:.6}", sample.mag_y.unwrap_or(0.0)).unwrap();
-                col += 1;
-                write!(&mut row_fields[col], "{:.6}", sample.mag_z.unwrap_or(0.0)).unwrap();
-                col += 1;
-            }
-            if options.include_temperature {
-                write!(&mut row_fields[col], "{:.6}", temp_value).unwrap();
-                col += 1;
-            }
-            if options.include_light {
-                write!(&mut row_fields[col], "{:.6}", light_value).unwrap();
-                col += 1;
-            }
-            if options.include_battery {
-                write!(&mut row_fields[col], "{:.6}", battery_value).unwrap();
-            }
-
-            writer.write_record(row_fields.iter().map(String::as_str))?;
+            write_csv_row(
+                &mut writer,
+                &mut row_fields,
+                &options,
+                CsvRowValues {
+                    timestamp: timestamps[i],
+                    acc_x: sample.acc_x,
+                    acc_y: sample.acc_y,
+                    acc_z: sample.acc_z,
+                    gyro_x: sample.gyro_x,
+                    gyro_y: sample.gyro_y,
+                    gyro_z: sample.gyro_z,
+                    mag_x: sample.mag_x,
+                    mag_y: sample.mag_y,
+                    mag_z: sample.mag_z,
+                    temperature: Some(temp_value),
+                    light: Some(light_value),
+                    battery: Some(battery_value),
+                },
+            )?;
         }
     }
 
@@ -1037,6 +1763,21 @@ mod tests {
         (x, y, z)
     }
 
+    fn sample_with_acc_x(acc_x: f32) -> SampleData {
+        SampleData {
+            acc_x,
+            acc_y: 0.0,
+            acc_z: 0.0,
+            gyro_x: 0.0,
+            gyro_y: 0.0,
+            gyro_z: 0.0,
+            mag_x: None,
+            mag_y: None,
+            mag_z: None,
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
     fn c_style_timestamps(
         year: i32,
         month: u32,
@@ -1237,5 +1978,35 @@ mod tests {
                 .expect("seeded block2");
 
         assert_eq!(full_ts_2, seeded_ts_2);
+    }
+
+    #[test]
+    fn streaming_resampler_waits_for_cubic_lookahead() {
+        let parse_options = CwaParsingOptions {
+            include_magnetometer: false,
+            include_temperature: false,
+            include_light: false,
+            include_battery: false,
+        };
+        let mut resampler = StreamingResampler::new(
+            &parse_options,
+            ResampleOptions { target_hz: 2.0 },
+            TimeRangeOptions {
+                start_time_seconds: Some(1.5),
+                end_time_seconds: Some(2.0),
+            },
+        )
+        .expect("resampler");
+
+        for t in [0.0_f64, 1.0, 2.0] {
+            resampler.push_sample(t, &sample_with_acc_x((t * t * t) as f32), 0.0, 0.0, 0.0);
+        }
+        assert!(resampler.result.timestamps.is_empty());
+
+        resampler.push_sample(3.0, &sample_with_acc_x(27.0), 0.0, 0.0, 0.0);
+        let result = resampler.into_result().expect("result");
+
+        assert_eq!(result.timestamps, vec![1_500_000]);
+        assert!((result.acc_x[0] - 3.375).abs() < 1e-6);
     }
 }

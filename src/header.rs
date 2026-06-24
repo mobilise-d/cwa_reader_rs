@@ -47,11 +47,11 @@ fn get_cwa_timestamp(cwa_time_info: u32) -> Option<DateTime<Utc>> {
 
     // Timestamps are packed: (MSB) YYYYYYMM MMDDDDDh hhhhmmmm mmssssss (LSB)
     let year = ((cwa_time_info >> 26) & 0x3f) as i32 + 2000;
-    let month = ((cwa_time_info >> 22) & 0x0f) as u32;
-    let day = ((cwa_time_info >> 17) & 0x1f) as u32;
-    let hours = ((cwa_time_info >> 12) & 0x1f) as u32;
-    let mins = ((cwa_time_info >> 6) & 0x3f) as u32;
-    let secs = (cwa_time_info & 0x3f) as u32;
+    let month = (cwa_time_info >> 22) & 0x0f;
+    let day = (cwa_time_info >> 17) & 0x1f;
+    let hours = (cwa_time_info >> 12) & 0x1f;
+    let mins = (cwa_time_info >> 6) & 0x3f;
+    let secs = cwa_time_info & 0x3f;
 
     match Utc.with_ymd_and_hms(year, month, day, hours, mins, secs) {
         chrono::LocalResult::Single(dt) => Some(dt),
@@ -219,24 +219,15 @@ pub fn read_header(py: Python, file_path: &str) -> PyResult<Py<PyAny>> {
             // Timing configuration
             header_dict.set_item(
                 "logging_start_time",
-                header
-                    .logging_start_time
-                    .map(|t| t.to_rfc3339())
-                    .unwrap_or_else(|| "None".to_string()),
+                header.logging_start_time.map(|t| t.to_rfc3339()),
             )?;
             header_dict.set_item(
                 "logging_end_time",
-                header
-                    .logging_end_time
-                    .map(|t| t.to_rfc3339())
-                    .unwrap_or_else(|| "None".to_string()),
+                header.logging_end_time.map(|t| t.to_rfc3339()),
             )?;
             header_dict.set_item(
                 "last_change_time",
-                header
-                    .last_change_time
-                    .map(|t| t.to_rfc3339())
-                    .unwrap_or_else(|| "None".to_string()),
+                header.last_change_time.map(|t| t.to_rfc3339()),
             )?;
 
             // Device configuration

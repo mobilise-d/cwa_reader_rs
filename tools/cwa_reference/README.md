@@ -14,6 +14,7 @@ These scripts are self-contained and do not require OpenMovement to be pre-insta
   - `Software/AX3/cwa-convert/c/main.c`
   - `Software/AX3/cwa-convert/c/cwa.c`
   - `Software/AX3/cwa-convert/c/cwa.h`
+  - Reference implementation: https://github.com/openmovementproject/openmovement/tree/master/Software/AX3/cwa-convert/c
 - Build a local `cwa-convert` binary using `cc`.
 - Download the public sample file `example-610-steps.cwa` (unless `--file` is supplied).
 - Run Rust-vs-C comparisons and benchmark commands.
