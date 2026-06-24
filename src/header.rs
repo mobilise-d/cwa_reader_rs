@@ -202,6 +202,177 @@ fn read_cwa_header(file_path: &str) -> Result<CwaHeader, errors::CwaError> {
     })
 }
 
+#[derive(Debug, Clone, Copy)]
+struct DataTimingSummary {
+    first_sample_us: Option<i64>,
+    last_sample_us: Option<i64>,
+    sample_count: u64,
+}
+
+fn timestamp_us_to_rfc3339(timestamp_us: i64) -> Option<String> {
+    let secs = timestamp_us.div_euclid(1_000_000);
+    let micros = timestamp_us.rem_euclid(1_000_000) as u32;
+    Utc.timestamp_opt(secs, micros * 1_000)
+        .single()
+        .map(|time| time.to_rfc3339())
+}
+
+fn data_packet_bounds(buffer: &[u8]) -> Result<Option<(f64, f64, usize)>, errors::CwaError> {
+    if buffer.len() != 512 || &buffer[0..2] != b"AX" {
+        return Ok(None);
+    }
+
+    let sample_rate = buffer[24];
+    let sample_count = u16::from_le_bytes([buffer[28], buffer[29]]) as usize;
+    if sample_count == 0 {
+        return Ok(None);
+    }
+    if sample_rate == 0 {
+        return Err("Old CWA format packets are not supported".into());
+    }
+
+    let timestamp = u32::from_le_bytes([buffer[14], buffer[15], buffer[16], buffer[17]]);
+    let block_timestamp = get_cwa_timestamp(timestamp).ok_or("Invalid block timestamp")?;
+    let timestamp_offset = i16::from_le_bytes([buffer[26], buffer[27]]);
+
+    let freq = (3200.0 / ((1 << (15 - (sample_rate & 0x0F))) as f64)) as f32;
+    let mut offset_start = -(timestamp_offset as f32) / freq;
+    let offset_floor = offset_start.floor();
+    let time0 = block_timestamp.timestamp() as f64 + offset_floor as f64;
+    offset_start -= offset_floor;
+
+    let t0 = time0 + offset_start as f64;
+    let t1 = t0 + (sample_count as f32 / freq) as f64;
+    Ok(Some((t0, t1, sample_count)))
+}
+
+fn scan_data_timing(file_path: &str) -> Result<DataTimingSummary, errors::CwaError> {
+    let mut file = File::open(file_path)?;
+
+    let mut metadata = [0u8; 1024];
+    file.read_exact(&mut metadata)?;
+    if &metadata[0..2] != b"MD" {
+        return Err("First block is not a metadata block".into());
+    }
+
+    let mut buffer = [0u8; 512];
+    let mut previous_packet_end = None;
+    let mut first_sample_us = None;
+    let mut last_sample_us = None;
+    let mut sample_count_total = 0_u64;
+
+    loop {
+        match file.read_exact(&mut buffer) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::UnexpectedEof => break,
+            Err(error) => return Err(error.into()),
+        }
+
+        let Some((natural_t0, natural_t1, sample_count)) = data_packet_bounds(&buffer)? else {
+            continue;
+        };
+
+        let mut t0 = natural_t0;
+        if let Some(last_end) = previous_packet_end {
+            if t0 - last_end < 1.0 {
+                t0 = last_end;
+            }
+        }
+
+        let step = (natural_t1 - t0) / sample_count as f64;
+        let packet_first_us = (t0 * 1_000_000.0) as i64;
+        let packet_last_us = ((t0 + (sample_count - 1) as f64 * step) * 1_000_000.0) as i64;
+
+        first_sample_us.get_or_insert(packet_first_us);
+        last_sample_us = Some(packet_last_us);
+        sample_count_total += sample_count as u64;
+        previous_packet_end = Some(natural_t1);
+    }
+
+    Ok(DataTimingSummary {
+        first_sample_us,
+        last_sample_us,
+        sample_count: sample_count_total,
+    })
+}
+
+/// Return a sampling consistency report for a CWA file.
+///
+/// The returned dictionary contains:
+///
+/// - `start_from_header`: RFC 3339 timestamp from the metadata block `logging_start_time`
+///   field, or `None` when the header uses an unset marker.
+/// - `end_from_header`: RFC 3339 timestamp from the metadata block `logging_end_time`
+///   field, or `None` when the header uses an unset marker.
+/// - `duration_s_from_header`: `end_from_header - start_from_header` in seconds, or
+///   `None` when either header timestamp is unavailable.
+/// - `start_from_data`: RFC 3339 timestamp of the first sample produced by the data
+///   packets, using the same packet timestamp, `timestampOffset`, and continuity
+///   correction as `read_cwa_file`.
+/// - `end_from_data`: RFC 3339 timestamp of the last sample produced by the data
+///   packets, using the same timestamp calculation as `read_cwa_file`.
+/// - `duration_s_from_data`: `end_from_data - start_from_data` in seconds. This is
+///   the inclusive first-sample-to-last-sample span, not the half-open packet end.
+/// - `samplingrate_hz_from_header`: nominal sampling rate decoded from the metadata
+///   block sampling-rate code as `3200 / (1 << (15 - (rate_code & 0x0f)))`.
+/// - `samplingrate_hz_from_data`: effective sampling rate calculated as
+///   `(sample_count - 1) / duration_s_from_data`, or `None` when fewer than two
+///   samples or no positive data duration are available.
+#[pyfunction]
+pub fn sampling_consistency_report(py: Python, file_path: &str) -> PyResult<Py<PyAny>> {
+    let header = read_cwa_header(file_path)
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
+    let data = scan_data_timing(file_path)
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
+
+    let duration_s_from_header = match (
+        header.logging_start_time.as_ref(),
+        header.logging_end_time.as_ref(),
+    ) {
+        (Some(start), Some(end)) => {
+            Some((end.timestamp_micros() - start.timestamp_micros()) as f64 / 1_000_000.0)
+        }
+        _ => None,
+    };
+
+    let duration_s_from_data = match (data.first_sample_us, data.last_sample_us) {
+        (Some(start), Some(end)) => Some((end - start) as f64 / 1_000_000.0),
+        _ => None,
+    };
+
+    let samplingrate_hz_from_data = duration_s_from_data.and_then(|duration| {
+        if data.sample_count > 1 && duration > 0.0 {
+            Some((data.sample_count - 1) as f64 / duration)
+        } else {
+            None
+        }
+    });
+
+    let report = pyo3::types::PyDict::new(py);
+    report.set_item(
+        "start_from_header",
+        header.logging_start_time.map(|time| time.to_rfc3339()),
+    )?;
+    report.set_item(
+        "end_from_header",
+        header.logging_end_time.map(|time| time.to_rfc3339()),
+    )?;
+    report.set_item("duration_s_from_header", duration_s_from_header)?;
+    report.set_item(
+        "start_from_data",
+        data.first_sample_us.and_then(timestamp_us_to_rfc3339),
+    )?;
+    report.set_item(
+        "end_from_data",
+        data.last_sample_us.and_then(timestamp_us_to_rfc3339),
+    )?;
+    report.set_item("duration_s_from_data", duration_s_from_data)?;
+    report.set_item("samplingrate_hz_from_header", header.sample_rate_hz)?;
+    report.set_item("samplingrate_hz_from_data", samplingrate_hz_from_data)?;
+
+    Ok(report.into())
+}
+
 #[pyfunction]
 pub fn read_header(py: Python, file_path: &str) -> PyResult<Py<PyAny>> {
     match read_cwa_header(file_path) {

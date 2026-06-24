@@ -1,16 +1,63 @@
 from __future__ import annotations
 
 from pathlib import Path
+from datetime import datetime
 
 import numpy as np
 import pandas as pd
 import pytest
 
-from cwa_reader_rs import blocks, read_cwa_file, seconds, write_cwa_csv
+from cwa_reader_rs import (
+    blocks,
+    read_cwa_file,
+    sampling_consistency_report,
+    seconds,
+    write_cwa_csv,
+)
 
 
 FIXTURE_DIR = Path(__file__).resolve().parent / "reference_data" / "openmovement"
 CWA_FILE = FIXTURE_DIR / "example-610-steps.cwa"
+
+
+def _parse_rfc3339_us(value: str) -> int:
+    return int(datetime.fromisoformat(value).timestamp() * 1_000_000)
+
+
+def test_sampling_consistency_report_matches_reader_timestamps() -> None:
+    report = sampling_consistency_report(str(CWA_FILE))
+    data = read_cwa_file(
+        str(CWA_FILE),
+        include_magnetometer=False,
+        include_temperature=False,
+        include_light=False,
+        include_battery=False,
+    )
+
+    assert report["start_from_header"] is None
+    assert report["end_from_header"] is None
+    assert report["duration_s_from_header"] is None
+    assert report["samplingrate_hz_from_header"] == 100.0
+
+    start_us = int(data["timestamp"][0])
+    end_us = int(data["timestamp"][-1])
+    duration_s = (end_us - start_us) / 1_000_000.0
+
+    assert _parse_rfc3339_us(report["start_from_data"]) == start_us
+    assert _parse_rfc3339_us(report["end_from_data"]) == end_us
+    assert report["duration_s_from_data"] == duration_s
+    assert report["samplingrate_hz_from_data"] == pytest.approx(
+        (len(data["timestamp"]) - 1) / duration_s
+    )
+
+
+def test_sampling_consistency_report_docstring_describes_fields() -> None:
+    doc = sampling_consistency_report.__doc__
+
+    assert doc is not None
+    assert "start_from_header" in doc
+    assert "end_from_data" in doc
+    assert "(sample_count - 1) / duration_s_from_data" in doc
 
 
 def test_write_cwa_csv_matches_read_api_for_partial_window(tmp_path: Path) -> None:
