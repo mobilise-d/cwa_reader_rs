@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 import pytest
 
@@ -102,6 +103,36 @@ def test_read_resample_with_time_range_returns_regular_grid() -> None:
     assert abs(float(data["timestamp"][0]) / 1_000_000.0 - start) < 1e-6
     step = (data["timestamp"][1] - data["timestamp"][0]) / 1_000_000.0
     assert abs(float(step) - 0.01) < 1e-9
+
+
+def test_resampled_partial_read_matches_full_read_for_same_window() -> None:
+    partial_source = read_cwa_file(
+        str(CWA_FILE),
+        25,
+        7,
+        include_magnetometer=False,
+        include_temperature=True,
+        include_light=True,
+        include_battery=True,
+    )
+    start = float(partial_source["timestamp"][50]) / 1_000_000.0
+    end = float(partial_source["timestamp"][700]) / 1_000_000.0
+
+    options = {
+        "include_magnetometer": False,
+        "include_temperature": True,
+        "include_light": True,
+        "include_battery": True,
+        "resample_hz": 100.0,
+        "range_start_time": start,
+        "range_end_time": end,
+    }
+    full = read_cwa_file(str(CWA_FILE), 0, None, **options)
+    partial = read_cwa_file(str(CWA_FILE), 25, 7, **options)
+
+    assert full.keys() == partial.keys()
+    for key in full:
+        np.testing.assert_array_equal(partial[key], full[key], err_msg=key)
 
 
 def test_invalid_time_range_is_rejected_before_opening_file() -> None:
