@@ -8,7 +8,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from cwa_reader_rs import read_cwa_file
+from cwa_reader_rs import blocks, read_cwa_file
 
 from common import ensure_cwa_convert, ensure_example_cwa
 
@@ -134,7 +134,11 @@ def main() -> int:
     cursor = 0
     for b in range(total_blocks):
         try:
-            n = len(read_cwa_file(str(cwa_file), b, 1, **opts)["timestamp"])
+            n = len(
+                read_cwa_file(str(cwa_file), cut=blocks(b, b + 1), **opts)[
+                    "timestamp"
+                ]
+            )
         except Exception:
             n = 0
         block_ranges.append((cursor, cursor + n))
@@ -151,7 +155,9 @@ def main() -> int:
             print(f"{start}:{count} skipped")
             continue
 
-        rust_df = to_df_rust(read_cwa_file(str(cwa_file), start, count, **opts))
+        rust_df = to_df_rust(
+            read_cwa_file(str(cwa_file), cut=blocks(start, start + count), **opts)
+        )
 
         c_part_csv = out_dir / f"c_partial_{start}_{count}.csv"
         run_c_window(cwa_convert, cwa_file, c_part_csv, start, count)

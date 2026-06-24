@@ -6,7 +6,7 @@ import struct
 import time
 from pathlib import Path
 
-from cwa_reader_rs import read_cwa_file
+from cwa_reader_rs import blocks, read_cwa_file
 
 from common import ensure_example_cwa
 
@@ -41,7 +41,7 @@ def full_parse_seconds(file_path: Path, loops: int) -> float:
 
     start = time.perf_counter()
     for _ in range(loops):
-        _ = read_cwa_file(str(file_path), 0, total_blocks, **opts)
+        _ = read_cwa_file(str(file_path), cut=blocks(0, total_blocks), **opts)
     end = time.perf_counter()
     return (end - start) / loops
 

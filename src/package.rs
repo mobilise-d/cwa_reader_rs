@@ -1302,7 +1302,7 @@ fn read_cwa_data_resampled_streaming(
     num_blocks: Option<usize>,
     parse_options: CwaParsingOptions,
     resample_options: ResampleOptions,
-    time_range: TimeRangeOptions,
+    cut_range: TimeRangeOptions,
 ) -> Result<CwaDataResult, CwaError> {
     let (mut file, start_block, end_block, initial_previous_packet_end) =
         open_cwa_data_blocks(file_path, start_block, num_blocks)?;
@@ -1310,6 +1310,7 @@ fn read_cwa_data_resampled_streaming(
     let mut previous_packet_end: Option<f64> = initial_previous_packet_end;
     let mut buffer = [0u8; 512];
     let mut resampler: Option<StreamingResampler> = None;
+    let resample_range = cut_range;
 
     'block_loop: for _block_idx in start_block..end_block {
         match file.read_exact(&mut buffer) {
@@ -1342,7 +1343,7 @@ fn read_cwa_data_resampled_streaming(
             resampler = Some(StreamingResampler::new(
                 &parse_options,
                 resample_options,
-                time_range,
+                resample_range,
             )?);
         }
         let state = resampler.as_mut().expect("resampler initialized");

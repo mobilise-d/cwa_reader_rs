@@ -69,6 +69,6 @@ This prints average runtimes and a simple projection for larger files.
 
 ## Notes on block indexing
 
-- `cwa_reader_rs` `start_block` counts data blocks after the 1024-byte file header.
+- `cwa_reader_rs` `blocks(start, end)` counts data blocks after the 1024-byte file header.
 - C `cwa-convert -blockstart` counts 512-byte sectors from the start of the file.
-- Mapping: `c_blockstart = rust_start_block + 2`.
+- Mapping: `c_blockstart = rust_block_start + 2`.
