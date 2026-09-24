@@ -21,5 +21,8 @@ The source repository is:
 
 At import time, GitHub metadata did not report a detected top-level license for that repository.
 Treat this directory as third-party reference material used for compatibility testing.
+The fixtures are excluded from published source distributions while their
+redistribution terms are unresolved. The project's MIT license does not cover
+these third-party files.
 
 If license requirements change upstream, update this file and fixture usage accordingly.

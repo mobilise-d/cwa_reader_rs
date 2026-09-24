@@ -180,3 +180,44 @@ def test_invalid_seconds_cut_is_rejected_before_opening_file() -> None:
 def test_invalid_resample_rate_is_rejected_before_opening_file() -> None:
     with pytest.raises(ValueError, match="resample_hz"):
         read_cwa_file("does-not-matter.cwa", resample_hz=10_001.0)
+
+
+def test_non_data_sector_is_skipped_by_reads_export_and_timing_report(tmp_path: Path) -> None:
+    source = CWA_FILE.read_bytes()
+    with_gap = tmp_path / "with-gap.cwa"
+    with_gap.write_bytes(source[:1536] + bytes(512) + source[1536:])
+
+    options = dict(
+        include_magnetometer=False,
+        include_temperature=False,
+        include_light=False,
+        include_battery=False,
+    )
+    expected = read_cwa_file(str(CWA_FILE), **options)
+    actual = read_cwa_file(str(with_gap), **options)
+    for key in expected:
+        np.testing.assert_array_equal(actual[key], expected[key], err_msg=key)
+
+    expected_window = read_cwa_file(
+        str(CWA_FILE), cut=seconds(1.0, 2.0), resample_hz=100.0, **options
+    )
+    window = read_cwa_file(
+        str(with_gap), cut=seconds(1.0, 2.0), resample_hz=100.0, **options
+    )
+    for key in expected_window:
+        np.testing.assert_array_equal(window[key], expected_window[key], err_msg=key)
+    assert sampling_consistency_report(str(with_gap)) == sampling_consistency_report(str(CWA_FILE))
+
+    output = tmp_path / "with-gap.csv"
+    write_cwa_csv(str(with_gap), str(output), **options)
+    assert len(pd.read_csv(output)) == len(actual["timestamp"])
+
+
+def test_incomplete_data_sector_is_rejected_by_reader_and_report(tmp_path: Path) -> None:
+    truncated = tmp_path / "truncated.cwa"
+    truncated.write_bytes(CWA_FILE.read_bytes() + b"AX")
+
+    with pytest.raises(RuntimeError, match="Incomplete CWA data block"):
+        read_cwa_file(str(truncated), include_magnetometer=False)
+    with pytest.raises(RuntimeError, match="IO error"):
+        sampling_consistency_report(str(truncated))

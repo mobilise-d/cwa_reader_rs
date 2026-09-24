@@ -1,5 +1,6 @@
 use crate::errors::CwaError;
-use chrono::{DateTime, TimeZone, Utc};
+use crate::packet::{cwa_timestamp, packet_meta, read_sector, PacketMeta};
+use chrono::{DateTime, Utc};
 use csv::WriterBuilder;
 use pyo3::prelude::*;
 use std::collections::VecDeque;
@@ -146,6 +147,9 @@ fn resolve_block_range(
     }
 
     let data_size = file_size - 1024;
+    if !data_size.is_multiple_of(512) {
+        return Err("Incomplete CWA data block".into());
+    }
     let total_blocks = (data_size / 512) as usize;
     let start_block = start_block.unwrap_or(0);
     if start_block >= total_blocks {
@@ -296,30 +300,13 @@ fn resolve_seconds_read_plan(
     let mut spans = Vec::new();
     let mut previous_packet_end = None;
     let mut first_sample_time = None;
-    let mut buffer = [0u8; 512];
-
     for block_index in start_block..end_block {
-        match file.read_exact(&mut buffer) {
-            Ok(_) => {}
-            Err(_) => break,
-        }
-
-        let block = match CwaDataBlock::from_buffer(&buffer) {
-            Ok(block) => block,
-            Err(_) => continue,
+        let buffer = read_sector(&mut file)?.ok_or("Unexpected end of CWA data")?;
+        let Some(meta) = packet_meta(&buffer)? else {
+            continue;
         };
-        if block.sample_count == 0 {
-            continue;
-        }
-        if block.sample_rate == 0 {
-            return Err("Old CWA format packets are not supported".into());
-        }
-        if block.get_block_timestamp().is_none() {
-            continue;
-        }
 
-        let (natural_start, natural_end) =
-            natural_packet_bounds(&block, block.sample_count as usize)?;
+        let (natural_start, natural_end) = meta.natural_bounds();
         let mut adjusted_start = natural_start;
         if let Some(last_end) = previous_packet_end {
             if adjusted_start - last_end < 1.0 {
@@ -428,27 +415,7 @@ impl CwaDataBlock {
 
     /// Get the timestamp for this block
     fn get_block_timestamp(&self) -> Option<DateTime<Utc>> {
-        if self.timestamp == 0 {
-            return None;
-        }
-
-        // Parse CWA timestamp format: (MSB) YYYYYYMM MMDDDDDh hhhhmmmm mmssssss (LSB)
-        let year = ((self.timestamp >> 26) & 0x3f) as i32 + 2000;
-        let month = (self.timestamp >> 22) & 0x0f;
-        let day = (self.timestamp >> 17) & 0x1f;
-        let hours = (self.timestamp >> 12) & 0x1f;
-        let mins = (self.timestamp >> 6) & 0x3f;
-        let secs = self.timestamp & 0x3f;
-
-        match Utc.with_ymd_and_hms(year, month, day, hours, mins, secs) {
-            chrono::LocalResult::Single(dt) => Some(dt),
-            _ => None,
-        }
-    }
-
-    /// Get the actual sample rate in Hz
-    fn get_sample_rate_hz(&self) -> f64 {
-        3200.0 / ((1 << (15 - (self.sample_rate & 0x0F))) as f64)
+        cwa_timestamp(self.timestamp)
     }
 
     /// Get the number of axes (3=Axyz, 6=Gxyz/Axyz, 9=Gxyz/Axyz/Mxyz)
@@ -1202,24 +1169,12 @@ pub fn read_cwa_data(
     };
 
     let mut previous_packet_end: Option<f64> = initial_previous_packet_end;
-    let mut buffer = [0u8; 512];
-
     for _block_idx in start_block..end_block {
-        match file.read_exact(&mut buffer) {
-            Ok(_) => {}
-            Err(_) => break, // End of file
-        }
-
-        let data_block = CwaDataBlock::from_buffer(&buffer)?;
-
-        if data_block.sample_rate == 0 {
-            return Err("Old CWA format packets are not supported".into());
-        }
-
-        // Skip non-data blocks or blocks with no samples
-        if data_block.sample_count == 0 {
+        let buffer = read_sector(&mut file)?.ok_or("Unexpected end of CWA data")?;
+        if packet_meta(&buffer)?.is_none() {
             continue;
         }
+        let data_block = CwaDataBlock::from_buffer(&buffer)?;
 
         // Parse samples from this block
         let samples = data_block.parse_samples(&options)?;
@@ -1308,23 +1263,15 @@ fn read_cwa_data_resampled_streaming(
         open_cwa_data_blocks(file_path, start_block, num_blocks)?;
 
     let mut previous_packet_end: Option<f64> = initial_previous_packet_end;
-    let mut buffer = [0u8; 512];
     let mut resampler: Option<StreamingResampler> = None;
     let resample_range = cut_range;
 
     'block_loop: for _block_idx in start_block..end_block {
-        match file.read_exact(&mut buffer) {
-            Ok(_) => {}
-            Err(_) => break,
-        }
-
-        let data_block = CwaDataBlock::from_buffer(&buffer)?;
-        if data_block.sample_rate == 0 {
-            return Err("Old CWA format packets are not supported".into());
-        }
-        if data_block.sample_count == 0 {
+        let buffer = read_sector(&mut file)?.ok_or("Unexpected end of CWA data")?;
+        if packet_meta(&buffer)?.is_none() {
             continue;
         }
+        let data_block = CwaDataBlock::from_buffer(&buffer)?;
 
         let samples = data_block.parse_samples(&parse_options)?;
         let sample_count = samples.len();
@@ -1504,19 +1451,16 @@ fn natural_packet_bounds(
     data_block: &CwaDataBlock,
     sample_count: usize,
 ) -> Result<(f64, f64), CwaError> {
-    let block_timestamp = data_block
-        .get_block_timestamp()
-        .ok_or("Invalid block timestamp")?;
-
-    let freq = data_block.get_sample_rate_hz() as f32;
-    let mut offset_start = -(data_block.timestamp_offset as f32) / freq;
-    let offset_floor = offset_start.floor();
-    let time0 = block_timestamp.timestamp() as f64 + offset_floor as f64;
-    offset_start -= offset_floor;
-
-    let t0 = time0 + offset_start as f64;
-    let t1 = t0 + (sample_count as f32 / freq) as f64;
-    Ok((t0, t1))
+    if data_block.get_block_timestamp().is_none() {
+        return Err("Invalid block timestamp".into());
+    }
+    Ok(PacketMeta {
+        sample_count,
+        sample_rate: data_block.sample_rate,
+        timestamp: data_block.timestamp,
+        timestamp_offset: data_block.timestamp_offset,
+    }
+    .natural_bounds())
 }
 
 fn find_previous_packet_end(file: &mut File, start_block: usize) -> Result<Option<f64>, CwaError> {
@@ -1530,24 +1474,11 @@ fn find_previous_packet_end(file: &mut File, start_block: usize) -> Result<Optio
         let pos = 1024 + (idx as u64) * 512;
         file.seek(SeekFrom::Start(pos))?;
 
-        let mut buffer = vec![0u8; 512];
-        if file.read_exact(&mut buffer).is_err() {
-            continue;
-        }
-
-        let Ok(block) = CwaDataBlock::from_buffer(&buffer) else {
+        let buffer = read_sector(file)?.ok_or("Unexpected end of CWA data")?;
+        let Some(meta) = packet_meta(&buffer)? else {
             continue;
         };
-
-        if block.sample_rate == 0 || block.sample_count == 0 {
-            continue;
-        }
-
-        if block.get_block_timestamp().is_none() {
-            continue;
-        }
-
-        let (_, t1) = natural_packet_bounds(&block, block.sample_count as usize)?;
+        let (_, t1) = meta.natural_bounds();
         return Ok(Some(t1));
     }
 
@@ -1934,20 +1865,12 @@ fn write_cwa_csv_data(
         .collect();
 
     let mut previous_packet_end: Option<f64> = initial_previous_packet_end;
-    let mut buffer = [0u8; 512];
     for _block_idx in start_block..end_block {
-        match file.read_exact(&mut buffer) {
-            Ok(_) => {}
-            Err(_) => break,
-        }
-
-        let data_block = CwaDataBlock::from_buffer(&buffer)?;
-        if data_block.sample_rate == 0 {
-            return Err("Old CWA format packets are not supported".into());
-        }
-        if data_block.sample_count == 0 {
+        let buffer = read_sector(&mut file)?.ok_or("Unexpected end of CWA data")?;
+        if packet_meta(&buffer)?.is_none() {
             continue;
         }
+        let data_block = CwaDataBlock::from_buffer(&buffer)?;
 
         let samples = data_block.parse_samples(&options)?;
         let sample_count = samples.len();
@@ -1994,6 +1917,7 @@ fn write_cwa_csv_data(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::TimeZone;
 
     fn encode_cwa_timestamp(
         year: i32,

@@ -3,6 +3,7 @@ use pyo3::wrap_pyfunction;
 mod errors;
 mod header;
 mod package;
+mod packet;
 
 /// A Python module implemented in Rust.
 #[pymodule]

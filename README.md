@@ -23,6 +23,9 @@ Or install into the current environment:
 uv pip install cwa-reader-rs
 ```
 
+With pip, use `python -m pip install cwa-reader-rs`. Python 3.10 or newer and
+NumPy are required; the package installer installs NumPy automatically.
+
 ### Local Development
 
 Clone the repository and install the package locally:
@@ -58,6 +61,11 @@ acc_z = data["acc_z"]
 ```
 
 The returned object is a dictionary of NumPy arrays. Timestamps are integer Unix timestamps in microseconds.
+Accelerometer values are in g, gyroscope values are in degrees per second,
+temperature is in degrees Celsius, and battery is in volts. When a recording
+does not contain a requested gyro or magnetometer channel, its output array is
+filled with zeroes. A zero in such an array does not establish that the sensor
+measured zero. Set `include_magnetometer=False` to omit magnetometer arrays.
 
 ### Header Read
 
