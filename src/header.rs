@@ -1,4 +1,5 @@
 use crate::errors;
+use crate::packet::{cwa_timestamp, packet_meta, read_sector};
 use chrono::{DateTime, TimeZone, Utc};
 use pyo3::prelude::*;
 use serde::Serialize;
@@ -37,26 +38,6 @@ pub struct CwaHeader {
     // Parsed sensor configuration (for AX6)
     pub gyro_range: Option<u16>,
     pub magnetometer_enabled: bool,
-}
-
-fn get_cwa_timestamp(cwa_time_info: u32) -> Option<DateTime<Utc>> {
-    // Special values: 0 = always started/stopped, -1 (0xFFFFFFFF) = never started/stopped
-    if cwa_time_info == 0 || cwa_time_info == 0xFFFFFFFF {
-        return None;
-    }
-
-    // Timestamps are packed: (MSB) YYYYYYMM MMDDDDDh hhhhmmmm mmssssss (LSB)
-    let year = ((cwa_time_info >> 26) & 0x3f) as i32 + 2000;
-    let month = (cwa_time_info >> 22) & 0x0f;
-    let day = (cwa_time_info >> 17) & 0x1f;
-    let hours = (cwa_time_info >> 12) & 0x1f;
-    let mins = (cwa_time_info >> 6) & 0x3f;
-    let secs = cwa_time_info & 0x3f;
-
-    match Utc.with_ymd_and_hms(year, month, day, hours, mins, secs) {
-        chrono::LocalResult::Single(dt) => Some(dt),
-        _ => None,
-    }
 }
 
 fn parse_annotation(buffer: &[u8]) -> String {
@@ -123,11 +104,11 @@ fn read_cwa_header(file_path: &str) -> Result<CwaHeader, errors::CwaError> {
     // Logging start time (offset 13-16): CWA timestamp
     let logging_start_time_raw =
         u32::from_le_bytes([buffer[13], buffer[14], buffer[15], buffer[16]]);
-    let logging_start_time = get_cwa_timestamp(logging_start_time_raw);
+    let logging_start_time = cwa_timestamp(logging_start_time_raw);
 
     // Logging end time (offset 17-20): CWA timestamp
     let logging_end_time_raw = u32::from_le_bytes([buffer[17], buffer[18], buffer[19], buffer[20]]);
-    let logging_end_time = get_cwa_timestamp(logging_end_time_raw);
+    let logging_end_time = cwa_timestamp(logging_end_time_raw);
 
     // Logging capacity (offset 21-24): Deprecated, should be 0
     // let logging_capacity = u32::from_le_bytes([buffer[21], buffer[22], buffer[23], buffer[24]]);
@@ -170,7 +151,7 @@ fn read_cwa_header(file_path: &str) -> Result<CwaHeader, errors::CwaError> {
 
     // Last change time (offset 37-40): CWA timestamp
     let last_change_time_raw = u32::from_le_bytes([buffer[37], buffer[38], buffer[39], buffer[40]]);
-    let last_change_time = get_cwa_timestamp(last_change_time_raw);
+    let last_change_time = cwa_timestamp(last_change_time_raw);
 
     // Firmware revision (offset 41)
     let firmware_revision = buffer[41];
@@ -217,35 +198,6 @@ fn timestamp_us_to_rfc3339(timestamp_us: i64) -> Option<String> {
         .map(|time| time.to_rfc3339())
 }
 
-fn data_packet_bounds(buffer: &[u8]) -> Result<Option<(f64, f64, usize)>, errors::CwaError> {
-    if buffer.len() != 512 || &buffer[0..2] != b"AX" {
-        return Ok(None);
-    }
-
-    let sample_rate = buffer[24];
-    let sample_count = u16::from_le_bytes([buffer[28], buffer[29]]) as usize;
-    if sample_count == 0 {
-        return Ok(None);
-    }
-    if sample_rate == 0 {
-        return Err("Old CWA format packets are not supported".into());
-    }
-
-    let timestamp = u32::from_le_bytes([buffer[14], buffer[15], buffer[16], buffer[17]]);
-    let block_timestamp = get_cwa_timestamp(timestamp).ok_or("Invalid block timestamp")?;
-    let timestamp_offset = i16::from_le_bytes([buffer[26], buffer[27]]);
-
-    let freq = (3200.0 / ((1 << (15 - (sample_rate & 0x0F))) as f64)) as f32;
-    let mut offset_start = -(timestamp_offset as f32) / freq;
-    let offset_floor = offset_start.floor();
-    let time0 = block_timestamp.timestamp() as f64 + offset_floor as f64;
-    offset_start -= offset_floor;
-
-    let t0 = time0 + offset_start as f64;
-    let t1 = t0 + (sample_count as f32 / freq) as f64;
-    Ok(Some((t0, t1, sample_count)))
-}
-
 fn scan_data_timing(file_path: &str) -> Result<DataTimingSummary, errors::CwaError> {
     let mut file = File::open(file_path)?;
 
@@ -255,22 +207,17 @@ fn scan_data_timing(file_path: &str) -> Result<DataTimingSummary, errors::CwaErr
         return Err("First block is not a metadata block".into());
     }
 
-    let mut buffer = [0u8; 512];
     let mut previous_packet_end = None;
     let mut first_sample_us = None;
     let mut last_sample_us = None;
     let mut sample_count_total = 0_u64;
 
-    loop {
-        match file.read_exact(&mut buffer) {
-            Ok(()) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::UnexpectedEof => break,
-            Err(error) => return Err(error.into()),
-        }
-
-        let Some((natural_t0, natural_t1, sample_count)) = data_packet_bounds(&buffer)? else {
+    while let Some(buffer) = read_sector(&mut file)? {
+        let Some(meta) = packet_meta(&buffer)? else {
             continue;
         };
+        let (natural_t0, natural_t1) = meta.natural_bounds();
+        let sample_count = meta.sample_count;
 
         let mut t0 = natural_t0;
         if let Some(last_end) = previous_packet_end {
