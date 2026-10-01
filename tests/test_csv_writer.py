@@ -89,9 +89,6 @@ def test_write_cwa_csv_matches_read_api_for_partial_window(tmp_path: Path) -> No
         "acc_x",
         "acc_y",
         "acc_z",
-        "gyro_x",
-        "gyro_y",
-        "gyro_z",
         "temperature",
         "battery",
     ]
@@ -104,9 +101,6 @@ def test_write_cwa_csv_matches_read_api_for_partial_window(tmp_path: Path) -> No
         "acc_x",
         "acc_y",
         "acc_z",
-        "gyro_x",
-        "gyro_y",
-        "gyro_z",
         "temperature",
         "battery",
     ]:

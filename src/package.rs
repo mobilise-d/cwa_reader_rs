@@ -549,9 +549,9 @@ impl CwaDataBlock {
                 acc_x: x,
                 acc_y: y,
                 acc_z: z,
-                gyro_x: 0.0,
-                gyro_y: 0.0,
-                gyro_z: 0.0,
+                gyro_x: None,
+                gyro_y: None,
+                gyro_z: None,
                 mag_x: None,
                 mag_y: None,
                 mag_z: None,
@@ -596,9 +596,9 @@ impl CwaDataBlock {
                 acc_x: x as f32 / accel_unit,
                 acc_y: y as f32 / accel_unit,
                 acc_z: z as f32 / accel_unit,
-                gyro_x: 0.0,
-                gyro_y: 0.0,
-                gyro_z: 0.0,
+                gyro_x: None,
+                gyro_y: None,
+                gyro_z: None,
                 mag_x: None,
                 mag_y: None,
                 mag_z: None,
@@ -665,9 +665,9 @@ impl CwaDataBlock {
                 acc_x: ax,
                 acc_y: ay,
                 acc_z: az,
-                gyro_x: gx,
-                gyro_y: gy,
-                gyro_z: gz,
+                gyro_x: Some(gx),
+                gyro_y: Some(gy),
+                gyro_z: Some(gz),
                 mag_x: None,
                 mag_y: None,
                 mag_z: None,
@@ -747,9 +747,9 @@ impl CwaDataBlock {
                 acc_x: ax,
                 acc_y: ay,
                 acc_z: az,
-                gyro_x: gx,
-                gyro_y: gy,
-                gyro_z: gz,
+                gyro_x: Some(gx),
+                gyro_y: Some(gy),
+                gyro_z: Some(gz),
                 mag_x: if options.include_magnetometer {
                     Some(mx)
                 } else {
@@ -777,9 +777,9 @@ struct SampleData {
     acc_x: f32,
     acc_y: f32,
     acc_z: f32,
-    gyro_x: f32,
-    gyro_y: f32,
-    gyro_z: f32,
+    gyro_x: Option<f32>,
+    gyro_y: Option<f32>,
+    gyro_z: Option<f32>,
     mag_x: Option<f32>,
     mag_y: Option<f32>,
     mag_z: Option<f32>,
@@ -792,9 +792,9 @@ pub struct CwaDataResult {
     pub acc_x: Vec<f32>,
     pub acc_y: Vec<f32>,
     pub acc_z: Vec<f32>,
-    pub gyro_x: Vec<f32>,
-    pub gyro_y: Vec<f32>,
-    pub gyro_z: Vec<f32>,
+    pub gyro_x: Option<Vec<f32>>,
+    pub gyro_y: Option<Vec<f32>>,
+    pub gyro_z: Option<Vec<f32>>,
     pub mag_x: Option<Vec<f32>>,
     pub mag_y: Option<Vec<f32>>,
     pub mag_z: Option<Vec<f32>>,
@@ -803,15 +803,41 @@ pub struct CwaDataResult {
     pub battery_levels: Option<Vec<f32>>,
 }
 
+/// Allocate a sensor column only once the sensor occurs in a sample.
+/// Missing samples in a present channel are NaN, never fabricated zeroes.
+fn append_sensor_value(column: &mut Option<Vec<f32>>, value: Option<f32>, previous_len: usize) {
+    if column.is_none() && value.is_some() {
+        *column = Some(vec![f32::NAN; previous_len]);
+    }
+    if let Some(values) = column {
+        values.push(value.unwrap_or(f32::NAN));
+    }
+}
+
+#[derive(Clone, Copy, Default)]
+struct SensorChannels {
+    gyro: bool,
+    magnetometer: bool,
+}
+
+impl CwaDataResult {
+    fn sensor_channels(&self) -> SensorChannels {
+        SensorChannels {
+            gyro: self.gyro_x.is_some(),
+            magnetometer: self.mag_x.is_some(),
+        }
+    }
+}
+
 #[derive(Clone, Copy)]
 struct CsvRowValues {
     timestamp: i64,
     acc_x: f32,
     acc_y: f32,
     acc_z: f32,
-    gyro_x: f32,
-    gyro_y: f32,
-    gyro_z: f32,
+    gyro_x: Option<f32>,
+    gyro_y: Option<f32>,
+    gyro_z: Option<f32>,
     mag_x: Option<f32>,
     mag_y: Option<f32>,
     mag_z: Option<f32>,
@@ -861,24 +887,12 @@ impl StreamingResampler {
                 acc_x: Vec::new(),
                 acc_y: Vec::new(),
                 acc_z: Vec::new(),
-                gyro_x: Vec::new(),
-                gyro_y: Vec::new(),
-                gyro_z: Vec::new(),
-                mag_x: if parse_options.include_magnetometer {
-                    Some(Vec::new())
-                } else {
-                    None
-                },
-                mag_y: if parse_options.include_magnetometer {
-                    Some(Vec::new())
-                } else {
-                    None
-                },
-                mag_z: if parse_options.include_magnetometer {
-                    Some(Vec::new())
-                } else {
-                    None
-                },
+                gyro_x: None,
+                gyro_y: None,
+                gyro_z: None,
+                mag_x: None,
+                mag_y: None,
+                mag_z: None,
                 temperatures: if parse_options.include_temperature {
                     Some(Vec::new())
                 } else {
@@ -918,6 +932,32 @@ impl StreamingResampler {
         light: f32,
         battery: f32,
     ) {
+        // Presence follows selected source samples, even when a short sensor
+        // segment falls between every timestamp on the output grid.
+        let in_range = !self
+            .range
+            .start_time_seconds
+            .is_some_and(|start| time_seconds < start)
+            && !self
+                .range
+                .end_time_seconds
+                .is_some_and(|end| time_seconds >= end);
+        if in_range {
+            let output_len = self.result.timestamps.len();
+            for (column, value) in [
+                (&mut self.result.gyro_x, sample.gyro_x),
+                (&mut self.result.gyro_y, sample.gyro_y),
+                (&mut self.result.gyro_z, sample.gyro_z),
+                (&mut self.result.mag_x, sample.mag_x),
+                (&mut self.result.mag_y, sample.mag_y),
+                (&mut self.result.mag_z, sample.mag_z),
+            ] {
+                if value.is_some() {
+                    column.get_or_insert_with(|| vec![f32::NAN; output_len]);
+                }
+            }
+        }
+
         if self.done {
             return;
         }
@@ -1017,8 +1057,11 @@ impl StreamingResampler {
             let y2 = value_fn(&self.samples[right]) as f64;
             let y3 = value_fn(&self.samples[right + 1]) as f64;
 
-            if let Some(v) = cubic_lagrange_4pt(target_time, [x0, x1, x2, x3], [y0, y1, y2, y3]) {
-                return v as f32;
+            if [y0, y1, y2, y3].iter().all(|value| !value.is_nan()) {
+                if let Some(v) = cubic_lagrange_4pt(target_time, [x0, x1, x2, x3], [y0, y1, y2, y3])
+                {
+                    return v as f32;
+                }
             }
         }
 
@@ -1033,6 +1076,21 @@ impl StreamingResampler {
         }
     }
 
+    fn interpolate_sensor<F>(&self, left: usize, target_time: f64, value_fn: F) -> Option<f32>
+    where
+        F: Fn(&TimedSample) -> Option<f32>,
+    {
+        for index in [left, left + 1] {
+            if target_time == self.sample_time(index) {
+                return value_fn(&self.samples[index]);
+            }
+        }
+        let value = self.interpolate_value(left, target_time, |sample| {
+            value_fn(sample).unwrap_or(f32::NAN)
+        });
+        (!value.is_nan()).then_some(value)
+    }
+
     fn emit_one(&mut self, target_time: f64) {
         let acc_left = self.acc_left;
         let gyro_left = acc_left;
@@ -1040,24 +1098,12 @@ impl StreamingResampler {
         let out_acc_x = self.interpolate_value(acc_left, target_time, |s| s.sample.acc_x);
         let out_acc_y = self.interpolate_value(acc_left, target_time, |s| s.sample.acc_y);
         let out_acc_z = self.interpolate_value(acc_left, target_time, |s| s.sample.acc_z);
-        let out_gyro_x = self.interpolate_value(gyro_left, target_time, |s| s.sample.gyro_x);
-        let out_gyro_y = self.interpolate_value(gyro_left, target_time, |s| s.sample.gyro_y);
-        let out_gyro_z = self.interpolate_value(gyro_left, target_time, |s| s.sample.gyro_z);
-        let out_mag_x = if self.result.mag_x.is_some() {
-            Some(self.interpolate_value(acc_left, target_time, |s| s.sample.mag_x.unwrap_or(0.0)))
-        } else {
-            None
-        };
-        let out_mag_y = if self.result.mag_y.is_some() {
-            Some(self.interpolate_value(acc_left, target_time, |s| s.sample.mag_y.unwrap_or(0.0)))
-        } else {
-            None
-        };
-        let out_mag_z = if self.result.mag_z.is_some() {
-            Some(self.interpolate_value(acc_left, target_time, |s| s.sample.mag_z.unwrap_or(0.0)))
-        } else {
-            None
-        };
+        let out_gyro_x = self.interpolate_sensor(gyro_left, target_time, |s| s.sample.gyro_x);
+        let out_gyro_y = self.interpolate_sensor(gyro_left, target_time, |s| s.sample.gyro_y);
+        let out_gyro_z = self.interpolate_sensor(gyro_left, target_time, |s| s.sample.gyro_z);
+        let out_mag_x = self.interpolate_sensor(acc_left, target_time, |s| s.sample.mag_x);
+        let out_mag_y = self.interpolate_sensor(acc_left, target_time, |s| s.sample.mag_y);
+        let out_mag_z = self.interpolate_sensor(acc_left, target_time, |s| s.sample.mag_z);
         let out_temperature = if self.result.temperatures.is_some() {
             Some(self.interpolate_value(acc_left, target_time, |s| s.temperature))
         } else {
@@ -1080,19 +1126,13 @@ impl StreamingResampler {
         self.result.acc_x.push(out_acc_x);
         self.result.acc_y.push(out_acc_y);
         self.result.acc_z.push(out_acc_z);
-        self.result.gyro_x.push(out_gyro_x);
-        self.result.gyro_y.push(out_gyro_y);
-        self.result.gyro_z.push(out_gyro_z);
-
-        if let Some(ref mut mag_x) = self.result.mag_x {
-            mag_x.push(out_mag_x.expect("mag_x computed"));
-        }
-        if let Some(ref mut mag_y) = self.result.mag_y {
-            mag_y.push(out_mag_y.expect("mag_y computed"));
-        }
-        if let Some(ref mut mag_z) = self.result.mag_z {
-            mag_z.push(out_mag_z.expect("mag_z computed"));
-        }
+        let previous_len = self.result.timestamps.len() - 1;
+        append_sensor_value(&mut self.result.gyro_x, out_gyro_x, previous_len);
+        append_sensor_value(&mut self.result.gyro_y, out_gyro_y, previous_len);
+        append_sensor_value(&mut self.result.gyro_z, out_gyro_z, previous_len);
+        append_sensor_value(&mut self.result.mag_x, out_mag_x, previous_len);
+        append_sensor_value(&mut self.result.mag_y, out_mag_y, previous_len);
+        append_sensor_value(&mut self.result.mag_z, out_mag_z, previous_len);
 
         if let Some(ref mut temperatures) = self.result.temperatures {
             temperatures.push(out_temperature.expect("temperature computed"));
@@ -1134,24 +1174,12 @@ pub fn read_cwa_data(
     let mut acc_x = Vec::new();
     let mut acc_y = Vec::new();
     let mut acc_z = Vec::new();
-    let mut gyro_x = Vec::new();
-    let mut gyro_y = Vec::new();
-    let mut gyro_z = Vec::new();
-    let mut mag_x = if options.include_magnetometer {
-        Some(Vec::new())
-    } else {
-        None
-    };
-    let mut mag_y = if options.include_magnetometer {
-        Some(Vec::new())
-    } else {
-        None
-    };
-    let mut mag_z = if options.include_magnetometer {
-        Some(Vec::new())
-    } else {
-        None
-    };
+    let mut gyro_x = None;
+    let mut gyro_y = None;
+    let mut gyro_z = None;
+    let mut mag_x = None;
+    let mut mag_y = None;
+    let mut mag_z = None;
     let mut all_temperatures = if options.include_temperature {
         Some(Vec::new())
     } else {
@@ -1201,20 +1229,13 @@ pub fn read_cwa_data(
             acc_x.push(sample.acc_x);
             acc_y.push(sample.acc_y);
             acc_z.push(sample.acc_z);
-            gyro_x.push(sample.gyro_x);
-            gyro_y.push(sample.gyro_y);
-            gyro_z.push(sample.gyro_z);
-
-            // Handle magnetometer data if requested
-            if let Some(ref mut mag_x_vec) = mag_x {
-                mag_x_vec.push(sample.mag_x.unwrap_or(0.0));
-            }
-            if let Some(ref mut mag_y_vec) = mag_y {
-                mag_y_vec.push(sample.mag_y.unwrap_or(0.0));
-            }
-            if let Some(ref mut mag_z_vec) = mag_z {
-                mag_z_vec.push(sample.mag_z.unwrap_or(0.0));
-            }
+            let previous_len = acc_x.len() - 1;
+            append_sensor_value(&mut gyro_x, sample.gyro_x, previous_len);
+            append_sensor_value(&mut gyro_y, sample.gyro_y, previous_len);
+            append_sensor_value(&mut gyro_z, sample.gyro_z, previous_len);
+            append_sensor_value(&mut mag_x, sample.mag_x, previous_len);
+            append_sensor_value(&mut mag_y, sample.mag_y, previous_len);
+            append_sensor_value(&mut mag_z, sample.mag_z, previous_len);
         }
 
         // Only collect auxiliary data if requested
@@ -1304,7 +1325,13 @@ fn read_cwa_data_resampled_streaming(
                 light_value,
                 battery_value,
             );
-            if state.is_done() {
+            // Output can finish before the final selected source sample.
+            // Keep observing channel presence until the source reaches the cut end.
+            if state.is_done()
+                && cut_range
+                    .end_time_seconds
+                    .is_some_and(|end| ts_seconds >= end)
+            {
                 break 'block_loop;
             }
         }
@@ -1344,23 +1371,22 @@ fn filter_data_by_time_range(
 
     let filter_f32 = |src: Vec<f32>| -> Vec<f32> { keep_indices.iter().map(|&i| src[i]).collect() };
 
+    let filter_sensor = |src: Option<Vec<f32>>| {
+        src.map(filter_f32)
+            .filter(|values| values.iter().any(|value| !value.is_nan()))
+    };
+
     let timestamps = keep_indices.iter().map(|&i| data.timestamps[i]).collect();
     let acc_x = filter_f32(data.acc_x);
     let acc_y = filter_f32(data.acc_y);
     let acc_z = filter_f32(data.acc_z);
-    let gyro_x = filter_f32(data.gyro_x);
-    let gyro_y = filter_f32(data.gyro_y);
-    let gyro_z = filter_f32(data.gyro_z);
+    let gyro_x = filter_sensor(data.gyro_x);
+    let gyro_y = filter_sensor(data.gyro_y);
+    let gyro_z = filter_sensor(data.gyro_z);
 
-    let mag_x = data
-        .mag_x
-        .map(|src| keep_indices.iter().map(|&i| src[i]).collect());
-    let mag_y = data
-        .mag_y
-        .map(|src| keep_indices.iter().map(|&i| src[i]).collect());
-    let mag_z = data
-        .mag_z
-        .map(|src| keep_indices.iter().map(|&i| src[i]).collect());
+    let mag_x = filter_sensor(data.mag_x);
+    let mag_y = filter_sensor(data.mag_y);
+    let mag_z = filter_sensor(data.mag_z);
     let temperatures = data
         .temperatures
         .map(|src| keep_indices.iter().map(|&i| src[i]).collect());
@@ -1496,9 +1522,15 @@ fn create_python_dict_numpy(py: Python, data: CwaDataResult) -> PyResult<Py<PyAn
     dict.set_item("acc_x", data.acc_x.into_pyarray(py))?;
     dict.set_item("acc_y", data.acc_y.into_pyarray(py))?;
     dict.set_item("acc_z", data.acc_z.into_pyarray(py))?;
-    dict.set_item("gyro_x", data.gyro_x.into_pyarray(py))?;
-    dict.set_item("gyro_y", data.gyro_y.into_pyarray(py))?;
-    dict.set_item("gyro_z", data.gyro_z.into_pyarray(py))?;
+    if let Some(values) = data.gyro_x {
+        dict.set_item("gyro_x", values.into_pyarray(py))?;
+    }
+    if let Some(values) = data.gyro_y {
+        dict.set_item("gyro_y", values.into_pyarray(py))?;
+    }
+    if let Some(values) = data.gyro_z {
+        dict.set_item("gyro_z", values.into_pyarray(py))?;
+    }
 
     // Only include magnetometer data if requested
     if let Some(mag_x_data) = data.mag_x {
@@ -1525,11 +1557,12 @@ fn create_python_dict_numpy(py: Python, data: CwaDataResult) -> PyResult<Py<PyAn
     Ok(dict.into())
 }
 
-fn csv_header(options: &CwaParsingOptions) -> Vec<&'static str> {
-    let mut header = vec![
-        "time", "acc_x", "acc_y", "acc_z", "gyro_x", "gyro_y", "gyro_z",
-    ];
-    if options.include_magnetometer {
+fn csv_header(options: &CwaParsingOptions, channels: SensorChannels) -> Vec<&'static str> {
+    let mut header = vec!["time", "acc_x", "acc_y", "acc_z"];
+    if channels.gyro {
+        header.extend(["gyro_x", "gyro_y", "gyro_z"]);
+    }
+    if channels.magnetometer {
         header.push("mag_x");
         header.push("mag_y");
         header.push("mag_z");
@@ -1550,6 +1583,7 @@ fn write_csv_row<W: std::io::Write>(
     writer: &mut csv::Writer<W>,
     row_fields: &mut [String],
     options: &CwaParsingOptions,
+    channels: SensorChannels,
     row: CsvRowValues,
 ) -> Result<(), CwaError> {
     for field in row_fields.iter_mut() {
@@ -1570,19 +1604,35 @@ fn write_csv_row<W: std::io::Write>(
     col += 1;
     write!(&mut row_fields[col], "{:.6}", row.acc_z).unwrap();
     col += 1;
-    write!(&mut row_fields[col], "{:.6}", row.gyro_x).unwrap();
-    col += 1;
-    write!(&mut row_fields[col], "{:.6}", row.gyro_y).unwrap();
-    col += 1;
-    write!(&mut row_fields[col], "{:.6}", row.gyro_z).unwrap();
-    col += 1;
-
-    if options.include_magnetometer {
-        write!(&mut row_fields[col], "{:.6}", row.mag_x.unwrap_or(0.0)).unwrap();
+    if channels.gyro {
+        write!(
+            &mut row_fields[col],
+            "{:.6}",
+            row.gyro_x.unwrap_or(f32::NAN)
+        )
+        .unwrap();
         col += 1;
-        write!(&mut row_fields[col], "{:.6}", row.mag_y.unwrap_or(0.0)).unwrap();
+        write!(
+            &mut row_fields[col],
+            "{:.6}",
+            row.gyro_y.unwrap_or(f32::NAN)
+        )
+        .unwrap();
         col += 1;
-        write!(&mut row_fields[col], "{:.6}", row.mag_z.unwrap_or(0.0)).unwrap();
+        write!(
+            &mut row_fields[col],
+            "{:.6}",
+            row.gyro_z.unwrap_or(f32::NAN)
+        )
+        .unwrap();
+        col += 1;
+    }
+    if channels.magnetometer {
+        write!(&mut row_fields[col], "{:.6}", row.mag_x.unwrap_or(f32::NAN)).unwrap();
+        col += 1;
+        write!(&mut row_fields[col], "{:.6}", row.mag_y.unwrap_or(f32::NAN)).unwrap();
+        col += 1;
+        write!(&mut row_fields[col], "{:.6}", row.mag_z.unwrap_or(f32::NAN)).unwrap();
         col += 1;
     }
     if options.include_temperature {
@@ -1629,7 +1679,8 @@ fn write_data_result_csv(
         .quote_style(csv::QuoteStyle::Never)
         .from_writer(output_buffer);
 
-    let header = csv_header(options);
+    let channels = data.sensor_channels();
+    let header = csv_header(options, channels);
     writer.write_record(&header)?;
 
     let field_count = header.len();
@@ -1643,14 +1694,15 @@ fn write_data_result_csv(
             &mut writer,
             &mut row_fields,
             options,
+            channels,
             CsvRowValues {
                 timestamp: data.timestamps[i],
                 acc_x: data.acc_x[i],
                 acc_y: data.acc_y[i],
                 acc_z: data.acc_z[i],
-                gyro_x: data.gyro_x[i],
-                gyro_y: data.gyro_y[i],
-                gyro_z: data.gyro_z[i],
+                gyro_x: data.gyro_x.as_ref().map(|values| values[i]),
+                gyro_y: data.gyro_y.as_ref().map(|values| values[i]),
+                gyro_z: data.gyro_z.as_ref().map(|values| values[i]),
                 mag_x: data.mag_x.as_ref().map(|values| values[i]),
                 mag_y: data.mag_y.as_ref().map(|values| values[i]),
                 mag_z: data.mag_z.as_ref().map(|values| values[i]),
@@ -1707,6 +1759,10 @@ pub fn blocks(py: Python, start: Option<usize>, end: Option<usize>) -> PyResult<
 }
 
 /// Python interface for reading CWA data.
+///
+/// Gyro and magnetometer keys are included only when present in the selected
+/// samples. Recorded zero measurements remain present; missing samples in a
+/// present channel are NaN.
 ///
 /// Optional resampling parameters:
 /// - `resample_hz`: when set, data is resampled onto a regular grid.
@@ -1817,6 +1873,25 @@ pub fn write_cwa_csv(
     .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))
 }
 
+fn scan_sensor_channels(
+    file: &mut File,
+    start_block: usize,
+    end_block: usize,
+    options: &CwaParsingOptions,
+) -> Result<SensorChannels, CwaError> {
+    let mut channels = SensorChannels::default();
+    for _ in start_block..end_block {
+        let buffer = read_sector(file)?.ok_or("Unexpected end of CWA data")?;
+        if packet_meta(&buffer)?.is_some() {
+            let axes = buffer[25] >> 4;
+            channels.gyro |= axes >= 6;
+            channels.magnetometer |= axes == 9 && options.include_magnetometer;
+        }
+    }
+    file.seek(SeekFrom::Start(1024 + (start_block * 512) as u64))?;
+    Ok(channels)
+}
+
 fn write_cwa_csv_data(
     file_path: &str,
     output_path: &str,
@@ -1849,6 +1924,8 @@ fn write_cwa_csv_data(
     let (mut file, start_block, end_block, initial_previous_packet_end) =
         open_cwa_data_blocks(file_path, start_block, num_blocks)?;
 
+    let channels = scan_sensor_channels(&mut file, start_block, end_block, &options)?;
+
     let output_file = File::create(output_path)?;
     let output_buffer = BufWriter::with_capacity(16 * 1024 * 1024, output_file);
     let mut writer = WriterBuilder::new()
@@ -1856,7 +1933,7 @@ fn write_cwa_csv_data(
         .quote_style(csv::QuoteStyle::Never)
         .from_writer(output_buffer);
 
-    let header = csv_header(&options);
+    let header = csv_header(&options, channels);
     writer.write_record(&header)?;
 
     let field_count = header.len();
@@ -1891,6 +1968,7 @@ fn write_cwa_csv_data(
                 &mut writer,
                 &mut row_fields,
                 &options,
+                channels,
                 CsvRowValues {
                     timestamp: timestamps[i],
                     acc_x: sample.acc_x,
@@ -1948,9 +2026,9 @@ mod tests {
             acc_x,
             acc_y: 0.0,
             acc_z: 0.0,
-            gyro_x: 0.0,
-            gyro_y: 0.0,
-            gyro_z: 0.0,
+            gyro_x: None,
+            gyro_y: None,
+            gyro_z: None,
             mag_x: None,
             mag_y: None,
             mag_z: None,

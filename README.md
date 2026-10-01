@@ -63,9 +63,17 @@ acc_z = data["acc_z"]
 The returned object is a dictionary of NumPy arrays. Timestamps are integer Unix timestamps in microseconds.
 Accelerometer values are in g, gyroscope values are in degrees per second,
 temperature is in degrees Celsius, and battery is in volts. When a recording
-does not contain a requested gyro or magnetometer channel, its output array is
-filled with zeroes. A zero in such an array does not establish that the sensor
-measured zero. Set `include_magnetometer=False` to omit magnetometer arrays.
+does not contain a gyro or magnetometer channel in the selected samples, that
+channel's key is omitted. Channel presence comes from the recorded packet layout;
+channels with real zero measurements remain present. Set `include_magnetometer=False`
+to omit magnetometer arrays even when recorded. If packet layouts change within a
+selection, missing samples in a present channel are `NaN`. Resampling retains
+channels recorded in the selected source samples even when no output timestamp
+has a valid interpolated value; such arrays contain `NaN`.
+
+This is a breaking change before 1.0. Check for optional channel keys before
+accessing them, for example `if "gyro_x" in data:`. CSV exports follow the same
+rule and omit columns for absent channels.
 
 ### Header Read
 

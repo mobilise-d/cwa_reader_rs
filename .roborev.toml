@@ -1,0 +1,3 @@
+review_guidelines = """
+Before 1.0, absolutely no backwards compatibility is required. Permit breaking changes without compatibility shims. Require internal changes to update all affected in-repository consumers. From 1.0 onward, flag public breaking changes unless accompanied by a major version bump, migration guidance, and clear release notes.
+"""
