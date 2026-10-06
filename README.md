@@ -9,25 +9,19 @@
 
 It was created to provide a fast, small, and easier-to-distribute loader that integrates well with [mobgap](https://github.com/mobilise-d/mobgap). The port is mostly agent-generated and tested for correctness using multiple example files, including parity checks against the original Open Movement C implementation. Full-file reads are expected to match the C output, aside from the C CSV export's millisecond timestamp formatting tolerance; partial reads deliberately preserve full-read timestamp consistency. See [Comparison To The C Reference](#comparison-to-the-c-reference) for details.
 
-Read [Timezone handling](#timezone-handling) before analysing recording times,
-especially when a recording or a scheduled start spans a daylight saving change.
+Read [Timezone handling](#timezone-handling) before working with this library directly.
 
 ## Installation
 
-Install from PyPI with `uv`:
+Install from PyPI with `uv` or `pip`:
 
 ```bash
 uv add cwa-reader-rs
+# Or:
+pip install cwa-reader-rs
 ```
 
-Or install into the current environment:
-
-```bash
-uv pip install cwa-reader-rs
-```
-
-With pip, use `python -m pip install cwa-reader-rs`. Python 3.10 or newer and
-NumPy and pandas are required; the package installer installs them automatically.
+We support Python 3.10 or newer.
 
 ### Local Development
 
@@ -37,10 +31,50 @@ Clone the repository and install the package locally:
 git clone https://github.com/mobilise-d/cwa_reader_rs.git
 cd cwa_reader_rs
 uv sync --dev
-uv pip install -e .
 ```
 
 Because this package contains a Rust extension module built with [maturin](https://www.maturin.rs/), local source installs may require a working Rust toolchain. Install Rust with [rustup](https://rustup.rs/) if your platform does not have a pre-built wheel available.
+
+## Usage
+
+Load a full recording, resample to its configured sampling rate, and convert the
+timestamps to local time:
+
+```python
+from datetime import timezone
+from zoneinfo import ZoneInfo
+
+import pandas as pd
+from cwa_reader_rs import read_cwa_file, read_metadata
+
+path = "recording.cwa"
+tz = "Europe/Berlin"  # Timezone of the computer that synchronized the sensor.
+metadata = read_metadata(path)
+last_change_raw = metadata["last_change_time_raw"]
+expected_sampling_rate = metadata["sample_rate_hz"]
+
+# ASSUMPTION: last metadata change = last clock synchronization.
+# pandas raises if the configuration time is ambiguous or nonexistent.
+configured_local = pd.Timestamp(last_change_raw).tz_localize(ZoneInfo(tz))
+clock_timezone = timezone(configured_local.utcoffset())  # Fixed offset, no DST rules.
+
+data_utc = read_cwa_file(
+    path,
+    fixed_utc_offset_timezone=clock_timezone,
+    resample_hz=expected_sampling_rate,
+    resample_method="cubic",
+    include_magnetometer=True,
+    include_temperature=True,
+    include_light=True,
+    include_battery=True,
+)
+
+# Optional local-time analysis. tz_convert applies the timezone's DST rules.
+data_local = data_utc.tz_convert(tz)
+```
+
+See [metadata reads](#metadata-read), [timezone handling](#timezone-handling),
+and [partial reads](#partial-block-read) for more details.
 
 ## Timezone handling
 
@@ -104,8 +138,12 @@ metadata = read_metadata(path)
 last_change_raw = metadata["last_change_time_raw"]
 logging_start_raw = metadata["logging_start_time_raw"]
 logging_end_raw = metadata["logging_end_time_raw"]
-if any(value is None for value in (last_change_raw, logging_start_raw, logging_end_raw)):
-    raise ValueError("This example requires configuration and scheduled start/end times")
+if any(
+    value is None for value in (last_change_raw, logging_start_raw, logging_end_raw)
+):
+    raise ValueError(
+        "This example requires configuration and scheduled start/end times"
+    )
 
 # ASSUMPTION: last metadata change = last clock synchronization.
 # pandas raises if the configuration time is ambiguous or nonexistent.
@@ -113,8 +151,12 @@ configured_local = pd.Timestamp(last_change_raw).tz_localize(ZoneInfo(tz))
 clock_timezone = timezone(configured_local.utcoffset())  # Fixed offset, no DST rules.
 
 data = read_cwa_file(path, fixed_utc_offset_timezone=clock_timezone)
-logging_start_utc = pd.Timestamp(logging_start_raw).tz_localize(clock_timezone).tz_convert("UTC")
-logging_end_utc = pd.Timestamp(logging_end_raw).tz_localize(clock_timezone).tz_convert("UTC")
+logging_start_utc = (
+    pd.Timestamp(logging_start_raw).tz_localize(clock_timezone).tz_convert("UTC")
+)
+logging_end_utc = (
+    pd.Timestamp(logging_end_raw).tz_localize(clock_timezone).tz_convert("UTC")
+)
 
 # Optional local-time analysis. tz_convert applies the timezone's DST rules.
 data_local = data.tz_convert(tz)
@@ -167,7 +209,7 @@ timestamps to calculate elapsed seconds. pandas accounts for DST in that
 subtraction. Advance calendar days with `freq="D"` or `pd.DateOffset(days=1)`;
 adding `pd.Timedelta(hours=24)` instead advances exactly 24 elapsed hours.
 
-The loader's `seconds(...)` offsets are relative to the first valid sample,
+The loader's `seconds(...)` offsets are **relative to the first valid sample**,
 which can arrive after the configured `logging_start_local`. The header contains
 the scheduled start, not the measured first-sample time, and that scheduled value
 can be unset. Header information alone therefore does not determine the exact
@@ -175,20 +217,30 @@ origin of a seconds cut. `read_metadata` also provides `start_from_data_raw` and
 `end_from_data_raw` by scanning packet metadata without decoding sample values.
 Use those measured timestamps to choose cuts without first loading all samples.
 
-The example below first calculates offsets from the converted logging start,
-then subtracts the delay to the first sample. It continues from the previous
-example and clips partial first and last days to the configured recording interval.
-It stops at the final recorded date, so an early stop does not cause cuts for
-later days with no data.
+Depending on your application, you may want to start 24-hour bouts at the
+configured logging start or at the first valid sample. Local calendar days use
+local midnight as their boundary.
+
+The example below continues from the header-conversion example and uses the
+configured logging start and end as hard boundaries. It excludes samples before
+the configured start and at or after the configured end. It stops at the final
+recorded date, so an early stop does not cause cuts for later days with no data.
+
+To express each cut relative to the first sample, calculate `first_sample_delay`
+and subtract it from each day's start/end offsets relative to the logging start.
 
 ```python
 from cwa_reader_rs import seconds
 
 first_sample_local = (
-    pd.Timestamp(metadata["start_from_data_raw"]).tz_localize(clock_timezone).tz_convert(tz)
+    pd.Timestamp(metadata["start_from_data_raw"])
+    .tz_localize(clock_timezone)
+    .tz_convert(tz)
 )
 last_sample_local = (
-    pd.Timestamp(metadata["end_from_data_raw"]).tz_localize(clock_timezone).tz_convert(tz)
+    pd.Timestamp(metadata["end_from_data_raw"])
+    .tz_localize(clock_timezone)
+    .tz_convert(tz)
 )
 first_sample_delay = (first_sample_local - logging_start_local).total_seconds()
 
@@ -238,51 +290,7 @@ when converting the raw header times. Do not guess from recording start.
 Avoid configuring sensors during the repeated hour if you do not have
 another record of the synchronization time.
 
-## Usage
-
-### Full File Read
-
-```python
-from cwa_reader_rs import read_cwa_file
-
-data = read_cwa_file(
-    "recording.cwa",
-    include_magnetometer=False,
-    include_temperature=False,
-    include_light=False,
-    include_battery=False,
-)
-
-timestamps = data.index
-acc_x = data["acc_x"]
-acc_y = data["acc_y"]
-acc_z = data["acc_z"]
-```
-
-The returned object is a pandas DataFrame with a `DatetimeIndex` named `timestamp`.
-Without `fixed_utc_offset_timezone`, the index preserves the device clock without
-assigning a timezone. Sensor values are `float32` columns. Timestamps preserve
-the reader's microsecond precision.
-Accelerometer values are in g, gyroscope values are in degrees per second,
-temperature is in degrees Celsius, and battery is in volts. When a recording
-does not contain a gyro or magnetometer channel in the selected samples, that
-channel's column is omitted. Channel presence comes from the recorded packet layout;
-channels with real zero measurements remain present. Set `include_magnetometer=False`
-to omit magnetometer columns even when recorded. If packet layouts change within a
-selection, missing samples in a present channel are `NaN`. Resampling retains
-channels recorded in the selected source samples even when no output timestamp
-has a valid interpolated value; such columns contain `NaN`.
-
-This is a breaking change before 1.0: the metadata function is now `read_metadata`,
-and its time fields use the `_raw` suffix. Use `data.index` for timestamps and
-`data[column].to_numpy()` when a NumPy array is needed. Check for optional channel
-columns before accessing them, for example `if "gyro_x" in data.columns:`.
-CSV exports follow the same rule and omit columns for absent channels.
-
-The datetime index uses `datetime64[us]`, or `datetime64[us, UTC]`, with 8 bytes
-per timestamp. It wraps the transferred timestamp buffer without copying it;
-sensor columns also use the transferred NumPy buffers. Importing pandas adds
-process overhead, but the timestamp representation does not add per-sample memory.
+## Advanced usage
 
 ### Metadata read
 
