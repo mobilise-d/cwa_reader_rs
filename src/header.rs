@@ -232,21 +232,16 @@ struct DataTimingSummary {
     sample_count: u64,
 }
 
-fn format_recording_time(time: DateTime<Utc>, offset: Option<FixedOffset>) -> String {
-    match offset {
-        Some(offset) => {
-            (time - chrono::Duration::seconds(i64::from(offset.local_minus_utc()))).to_rfc3339()
-        }
-        None => time.naive_utc().format("%Y-%m-%dT%H:%M:%S%.f").to_string(),
-    }
+fn format_raw_time(time: DateTime<Utc>) -> String {
+    time.naive_utc().format("%Y-%m-%dT%H:%M:%S%.f").to_string()
 }
 
-fn timestamp_us_to_string(timestamp_us: i64, offset: Option<FixedOffset>) -> Option<String> {
+fn timestamp_us_to_raw_string(timestamp_us: i64) -> Option<String> {
     let secs = timestamp_us.div_euclid(1_000_000);
     let micros = timestamp_us.rem_euclid(1_000_000) as u32;
     Utc.timestamp_opt(secs, micros * 1_000)
         .single()
-        .map(|time| format_recording_time(time, offset))
+        .map(format_raw_time)
 }
 
 fn scan_data_timing(file_path: &str) -> Result<DataTimingSummary, errors::CwaError> {
@@ -298,18 +293,18 @@ fn scan_data_timing(file_path: &str) -> Result<DataTimingSummary, errors::CwaErr
 ///
 /// The returned dictionary contains:
 ///
-/// - `start_from_header`: ISO 8601 timestamp from the metadata block `logging_start_time`
+/// - `start_from_header_raw`: ISO 8601 timestamp from the metadata block `logging_start_time`
 ///   field, or `None` when the header uses an unset marker.
-/// - `end_from_header`: ISO 8601 timestamp from the metadata block `logging_end_time`
+/// - `end_from_header_raw`: ISO 8601 timestamp from the metadata block `logging_end_time`
 ///   field, or `None` when the header uses an unset marker.
-/// - `duration_s_from_header`: `end_from_header - start_from_header` in seconds, or
+/// - `duration_s_from_header`: `end_from_header_raw - start_from_header_raw` in seconds, or
 ///   `None` when either header timestamp is unavailable.
-/// - `start_from_data`: ISO 8601 timestamp of the first sample produced by the data
+/// - `start_from_data_raw`: ISO 8601 timestamp of the first sample produced by the data
 ///   packets, using the same packet timestamp, `timestampOffset`, and continuity
 ///   correction as `read_cwa_file`.
-/// - `end_from_data`: ISO 8601 timestamp of the last sample produced by the data
+/// - `end_from_data_raw`: ISO 8601 timestamp of the last sample produced by the data
 ///   packets, using the same timestamp calculation as `read_cwa_file`.
-/// - `duration_s_from_data`: `end_from_data - start_from_data` in seconds. This is
+/// - `duration_s_from_data`: `end_from_data_raw - start_from_data_raw` in seconds. This is
 ///   the inclusive first-sample-to-last-sample span, not the half-open packet end.
 /// - `samplingrate_hz_from_header`: nominal sampling rate decoded from the metadata
 ///   block sampling-rate code as `3200 / (1 << (15 - (rate_code & 0x0f)))`.
@@ -317,17 +312,11 @@ fn scan_data_timing(file_path: &str) -> Result<DataTimingSummary, errors::CwaErr
 ///   `(sample_count - 1) / duration_s_from_data`, or `None` when fewer than two
 ///   samples or no positive data duration are available.
 ///
-/// Timestamp strings are naive unless `utc_offset` is supplied. The fixed offset
-/// is applied throughout and timestamp strings are UTC. Durations and sampling
-/// rates are unchanged.
+/// All timestamp strings preserve the raw device clock without a timezone.
+/// Convert them to UTC or local time before analysis using the clock-sync offset.
+/// This method accepts no UTC offset or timezone.
 #[pyfunction]
-#[pyo3(signature = (file_path, *, utc_offset=None))]
-pub fn sampling_consistency_report(
-    py: Python,
-    file_path: &str,
-    utc_offset: Option<&str>,
-) -> PyResult<Py<PyAny>> {
-    let offset = parse_utc_offset(utc_offset)?;
+pub fn sampling_consistency_report(py: Python, file_path: &str) -> PyResult<Py<PyAny>> {
     let header = read_cwa_header(file_path)
         .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
     let data = scan_data_timing(file_path)
@@ -358,27 +347,21 @@ pub fn sampling_consistency_report(
 
     let report = pyo3::types::PyDict::new(py);
     report.set_item(
-        "start_from_header",
-        header
-            .logging_start_time
-            .map(|time| format_recording_time(time, offset)),
+        "start_from_header_raw",
+        header.logging_start_time.map(format_raw_time),
     )?;
     report.set_item(
-        "end_from_header",
-        header
-            .logging_end_time
-            .map(|time| format_recording_time(time, offset)),
+        "end_from_header_raw",
+        header.logging_end_time.map(format_raw_time),
     )?;
     report.set_item("duration_s_from_header", duration_s_from_header)?;
     report.set_item(
-        "start_from_data",
-        data.first_sample_us
-            .and_then(|time| timestamp_us_to_string(time, offset)),
+        "start_from_data_raw",
+        data.first_sample_us.and_then(timestamp_us_to_raw_string),
     )?;
     report.set_item(
-        "end_from_data",
-        data.last_sample_us
-            .and_then(|time| timestamp_us_to_string(time, offset)),
+        "end_from_data_raw",
+        data.last_sample_us.and_then(timestamp_us_to_raw_string),
     )?;
     report.set_item("duration_s_from_data", duration_s_from_data)?;
     report.set_item("samplingrate_hz_from_header", header.sample_rate_hz)?;
@@ -416,31 +399,23 @@ pub fn read_metadata(py: Python, file_path: &str) -> PyResult<Py<PyAny>> {
             // Timing configuration
             header_dict.set_item(
                 "logging_start_time_raw",
-                header
-                    .logging_start_time
-                    .map(|t| format_recording_time(t, None)),
+                header.logging_start_time.map(format_raw_time),
             )?;
             header_dict.set_item(
                 "logging_end_time_raw",
-                header
-                    .logging_end_time
-                    .map(|t| format_recording_time(t, None)),
+                header.logging_end_time.map(format_raw_time),
             )?;
             header_dict.set_item(
                 "last_change_time_raw",
-                header
-                    .last_change_time
-                    .map(|t| format_recording_time(t, None)),
+                header.last_change_time.map(format_raw_time),
             )?;
             header_dict.set_item(
                 "start_from_data_raw",
-                data.first_sample_us
-                    .and_then(|time| timestamp_us_to_string(time, None)),
+                data.first_sample_us.and_then(timestamp_us_to_raw_string),
             )?;
             header_dict.set_item(
                 "end_from_data_raw",
-                data.last_sample_us
-                    .and_then(|time| timestamp_us_to_string(time, None)),
+                data.last_sample_us.and_then(timestamp_us_to_raw_string),
             )?;
 
             // Device configuration

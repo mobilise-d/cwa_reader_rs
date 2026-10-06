@@ -140,12 +140,12 @@ two hours ahead of UTC, so sensor time `12:00` becomes `10:00` UTC. `"UTC"` and
 full reads, partial reads, and resampling. It does not infer a timezone or offset
 from the file. Without `utc_offset`, the data index remains naive.
 
-`read_metadata` always returns raw device-clock values and accepts no offset.
-`sampling_consistency_report` and `write_cwa_csv` accept `utc_offset` too. Report
-timestamps are naive ISO 8601 strings by default and UTC RFC 3339 strings when an
-offset is supplied. CSV `time` values encode the device clock by default and UTC
-Unix seconds with an offset. Elapsed-second cuts, durations, and sampling rates
-are unchanged.
+`read_metadata` and `sampling_consistency_report` always return raw device-clock
+timestamps under `_raw` keys and accept no UTC offset or timezone. Convert those
+values in Python using the same fixed clock offset as the samples.
+`write_cwa_csv` accepts `utc_offset` too. CSV `time` values encode the device clock
+by default and UTC Unix seconds with an offset. Elapsed-second cuts, durations,
+and sampling rates are unchanged.
 
 ### Footgun: 24-hour bouts versus local calendar days
 
@@ -313,11 +313,11 @@ from cwa_reader_rs import sampling_consistency_report
 
 report = sampling_consistency_report("recording.cwa")
 
-start_from_header = report["start_from_header"]
-end_from_header = report["end_from_header"]
+start_from_header_raw = report["start_from_header_raw"]
+end_from_header_raw = report["end_from_header_raw"]
 duration_s_from_header = report["duration_s_from_header"]
-start_from_data = report["start_from_data"]
-end_from_data = report["end_from_data"]
+start_from_data_raw = report["start_from_data_raw"]
+end_from_data_raw = report["end_from_data_raw"]
 duration_s_from_data = report["duration_s_from_data"]
 samplingrate_hz_from_header = report["samplingrate_hz_from_header"]
 samplingrate_hz_from_data = report["samplingrate_hz_from_data"]
@@ -325,9 +325,10 @@ samplingrate_hz_from_data = report["samplingrate_hz_from_data"]
 
 This helper compares the timing implied by the CWA metadata header with the timing implied by the data packets. It scans packet metadata only; it does not decode or return sample values.
 
-Header start/end and data start/end are returned as ISO 8601 strings or `None`,
-and remain timezone-naive unless `utc_offset` is supplied, in which case they are
-converted to UTC. Header duration is `end_from_header - start_from_header`. Data duration is the inclusive first-sample-to-last-sample span, using the same packet timestamp, `timestampOffset`, and continuity correction as `read_cwa_file`. The header sampling rate is decoded from the metadata rate code. The data sampling rate is `(sample_count - 1) / duration_s_from_data`.
+Header start/end and data start/end use `_raw` keys and are always timezone-naive
+ISO 8601 strings or `None`. They preserve the sensor clock and need conversion
+to UTC or local time for most analysis. This report accepts no offset or timezone.
+Header duration is `end_from_header_raw - start_from_header_raw`. Data duration is the inclusive first-sample-to-last-sample span, using the same packet timestamp, `timestampOffset`, and continuity correction as `read_cwa_file`. The header sampling rate is decoded from the metadata rate code. The data sampling rate is `(sample_count - 1) / duration_s_from_data`.
 
 The values provided in the header are configured values, not measured values. In timed recordings, data-derived start and end timestamps may differ from the configured header start and end by a few seconds, for example because logging starts after the device wakes and stops when the device reaches its configured stop condition.
 

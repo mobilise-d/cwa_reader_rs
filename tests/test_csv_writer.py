@@ -32,8 +32,8 @@ def test_sampling_consistency_report_matches_reader_timestamps() -> None:
         include_battery=False,
     )
 
-    assert report["start_from_header"] is None
-    assert report["end_from_header"] is None
+    assert report["start_from_header_raw"] is None
+    assert report["end_from_header_raw"] is None
     assert report["duration_s_from_header"] is None
     assert report["samplingrate_hz_from_header"] == 100.0
 
@@ -41,8 +41,8 @@ def test_sampling_consistency_report_matches_reader_timestamps() -> None:
     end_us = data.index[-1].value // 1000
     duration_s = (end_us - start_us) / 1_000_000.0
 
-    assert _parse_timestamp_us(report["start_from_data"]) == start_us
-    assert _parse_timestamp_us(report["end_from_data"]) == end_us
+    assert _parse_timestamp_us(report["start_from_data_raw"]) == start_us
+    assert _parse_timestamp_us(report["end_from_data_raw"]) == end_us
     assert report["duration_s_from_data"] == duration_s
     assert report["samplingrate_hz_from_data"] == pytest.approx(
         (len(data) - 1) / duration_s
@@ -53,8 +53,8 @@ def test_sampling_consistency_report_docstring_describes_fields() -> None:
     doc = sampling_consistency_report.__doc__
 
     assert doc is not None
-    assert "start_from_header" in doc
-    assert "end_from_data" in doc
+    assert "start_from_header_raw" in doc
+    assert "end_from_data_raw" in doc
     assert "(sample_count - 1) / duration_s_from_data" in doc
 
 

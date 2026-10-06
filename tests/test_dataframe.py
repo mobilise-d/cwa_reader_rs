@@ -139,7 +139,7 @@ def test_utc_offset_stays_fixed_across_dst(
 
 
 @pytest.mark.parametrize("utc_offset", [None, "UTC+1"])
-def test_metadata_stays_raw_while_report_and_csv_use_utc_offset(
+def test_metadata_and_report_stay_raw_while_data_and_csv_use_offset(
     tmp_path: Path,
     utc_offset: str | None,
 ) -> None:
@@ -147,15 +147,15 @@ def test_metadata_stays_raw_while_report_and_csv_use_utc_offset(
     kwargs = {"utc_offset": utc_offset}
     data = read_cwa_file(str(path), **kwargs)
     header = read_metadata(str(path))
-    report = sampling_consistency_report(str(path), **kwargs)
+    report = sampling_consistency_report(str(path))
 
     assert header["logging_start_time_raw"] == "2026-03-29T00:00:00"
     assert header["logging_end_time_raw"] == "2026-03-29T03:00:00"
     assert header["last_change_time_raw"] == "2026-03-29T00:00:00"
-    assert pd.Timestamp(report["start_from_data"]) == data.index[0]
-    assert pd.Timestamp(report["end_from_data"]) == data.index[-1]
-    assert pd.Timestamp(report["start_from_header"]) == data.index[0]
-    assert pd.Timestamp(report["end_from_header"]) == data.index[20]
+    assert report["start_from_data_raw"] == header["start_from_data_raw"]
+    assert report["end_from_data_raw"] == header["end_from_data_raw"]
+    assert report["start_from_header_raw"] == header["logging_start_time_raw"]
+    assert report["end_from_header_raw"] == header["logging_end_time_raw"]
     assert report["duration_s_from_header"] == 10800.0
     assert report["duration_s_from_data"] == pytest.approx(10800.19)
 
@@ -251,19 +251,16 @@ def test_fixed_offset_does_not_require_configuration_time(tmp_path: Path) -> Non
     )
 
 
-@pytest.mark.parametrize("utc_offset", [None, "UTC+1"])
 def test_header_only_metadata_returns_raw_times_and_no_sample_bounds(
     tmp_path: Path,
-    utc_offset: str | None,
 ) -> None:
     path = _recording(tmp_path, "2026-03-29T00:00:00")
     path.write_bytes(path.read_bytes()[:1024])
     header = read_metadata(str(path))
-    expected = "2026-03-28T23:00:00Z" if utc_offset else "2026-03-29T00:00:00"
     assert header["logging_start_time_raw"] == "2026-03-29T00:00:00"
     assert header["start_from_data_raw"] is None
     assert header["end_from_data_raw"] is None
-    report = sampling_consistency_report(str(path), utc_offset=utc_offset)
-    assert report["start_from_data"] is None
-    assert report["end_from_data"] is None
-    assert pd.Timestamp(report["start_from_header"]) == pd.Timestamp(expected)
+    report = sampling_consistency_report(str(path))
+    assert report["start_from_data_raw"] is None
+    assert report["end_from_data_raw"] is None
+    assert report["start_from_header_raw"] == header["logging_start_time_raw"]
