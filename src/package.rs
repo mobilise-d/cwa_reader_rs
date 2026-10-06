@@ -1,5 +1,4 @@
 use crate::errors::CwaError;
-use crate::header::parse_utc_offset;
 use crate::packet::{cwa_timestamp, packet_meta, read_sector, PacketMeta};
 use chrono::{DateTime, Utc};
 use csv::WriterBuilder;
@@ -10,7 +9,7 @@ use std::fs::File;
 use std::io::{BufWriter, Read, Seek, SeekFrom};
 
 use numpy::IntoPyArray;
-use pyo3::types::PyDict;
+use pyo3::types::{PyDelta, PyDeltaAccess, PyDict, PyTzInfo};
 
 const MAX_RESAMPLE_HZ: f64 = 10_000.0;
 
@@ -1779,11 +1778,26 @@ pub fn blocks(py: Python, start: Option<usize>, end: Option<usize>) -> PyResult<
     Ok(dict.into())
 }
 
+fn fixed_timezone_offset_us(timezone: Option<&Bound<'_, PyTzInfo>>) -> PyResult<Option<i64>> {
+    let Some(timezone) = timezone else {
+        return Ok(None);
+    };
+    let offset = timezone
+        .call_method1("utcoffset", (timezone.py().None(),))?
+        .cast_into::<PyDelta>()?;
+    Ok(Some(
+        (i64::from(offset.get_days()) * 86400 + i64::from(offset.get_seconds())) * 1_000_000
+            + i64::from(offset.get_microseconds()),
+    ))
+}
+
 /// Python interface for reading CWA data.
 ///
 /// Returns a pandas DataFrame with a DatetimeIndex named `timestamp`.
-/// With `utc_offset`, such as "UTC+2" or "UTC-05:30", that fixed offset is
-/// subtracted throughout and the index is UTC-aware. Otherwise it is naive.
+/// `fixed_utc_offset_timezone` accepts a Python `datetime.timezone` object.
+/// Its fixed offset is subtracted throughout and the index is UTC-aware.
+/// Otherwise the index is naive. Determine any named timezone's offset in Python
+/// at clock synchronization, rather than at recording start.
 /// Numeric channel columns retain their float32 dtype.
 ///
 /// Gyro and magnetometer columns are included only when present in the selected
@@ -1804,7 +1818,7 @@ pub fn blocks(py: Python, start: Option<usize>, end: Option<usize>) -> PyResult<
     resample_hz=None,
     resample_method="cubic",
     *,
-    utc_offset=None
+    fixed_utc_offset_timezone=None
 ))]
 #[allow(clippy::too_many_arguments)]
 pub fn read_cwa_file(
@@ -1817,7 +1831,7 @@ pub fn read_cwa_file(
     include_battery: bool,
     resample_hz: Option<f64>,
     resample_method: &str,
-    utc_offset: Option<&str>,
+    fixed_utc_offset_timezone: Option<&Bound<'_, PyTzInfo>>,
 ) -> PyResult<Py<PyAny>> {
     let options = CwaParsingOptions {
         include_magnetometer,
@@ -1830,7 +1844,7 @@ pub fn read_cwa_file(
     let resample_options = parse_resample_options(resample_hz, resample_method)?;
     let plan = resolve_read_plan(file_path, cut)
         .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
-    let offset = parse_utc_offset(utc_offset)?;
+    let offset_us = fixed_timezone_offset_us(fixed_utc_offset_timezone)?;
 
     match if let Some(resample) = resample_options {
         read_cwa_data_resampled_streaming(
@@ -1846,13 +1860,12 @@ pub fn read_cwa_file(
             .and_then(|data| filter_data_by_time_range(data, plan.time_range))
     } {
         Ok(mut data) => {
-            if let Some(offset) = offset {
-                let offset_us = i64::from(offset.local_minus_utc()) * 1_000_000;
+            if let Some(offset_us) = offset_us {
                 for timestamp in &mut data.timestamps {
                     *timestamp -= offset_us;
                 }
             }
-            create_python_dataframe(py, data, offset.is_some())
+            create_python_dataframe(py, data, offset_us.is_some())
         }
         Err(e) => Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
             e.to_string(),
@@ -1864,7 +1877,8 @@ pub fn read_cwa_file(
 /// Write CWA samples directly to CSV.
 ///
 /// Supports the same optional resampling and time-range controls as `read_cwa_file`.
-/// With `utc_offset`, numeric `time` values are UTC Unix seconds.
+/// `fixed_utc_offset_timezone` accepts a Python `datetime.timezone` object;
+/// with it, numeric `time` values are UTC Unix seconds.
 /// Otherwise they encode the device clock without assigning a timezone.
 #[pyo3(signature = (
     file_path,
@@ -1877,7 +1891,7 @@ pub fn read_cwa_file(
     resample_hz=None,
     resample_method="cubic",
     *,
-    utc_offset=None
+    fixed_utc_offset_timezone=None
 ))]
 #[allow(clippy::too_many_arguments)]
 pub fn write_cwa_csv(
@@ -1890,7 +1904,7 @@ pub fn write_cwa_csv(
     include_battery: bool,
     resample_hz: Option<f64>,
     resample_method: &str,
-    utc_offset: Option<&str>,
+    fixed_utc_offset_timezone: Option<&Bound<'_, PyTzInfo>>,
 ) -> PyResult<()> {
     let options = CwaParsingOptions {
         include_magnetometer,
@@ -1903,8 +1917,7 @@ pub fn write_cwa_csv(
     let resample_options = parse_resample_options(resample_hz, resample_method)?;
     let plan = resolve_read_plan(file_path, cut)
         .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
-    let offset_us = parse_utc_offset(utc_offset)?
-        .map_or(0, |offset| i64::from(offset.local_minus_utc()) * 1_000_000);
+    let offset_us = fixed_timezone_offset_us(fixed_utc_offset_timezone)?.unwrap_or(0);
 
     write_cwa_csv_data(
         file_path,

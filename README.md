@@ -86,12 +86,13 @@ For a scheduled recording, use this workflow:
 2. Use Python's [`zoneinfo`](https://docs.python.org/3/library/zoneinfo.html) and pandas to determine the configuration timezone's
    offset at `last_change_time_raw`. This assumes configuration also synchronized
    the clock. Check that assumption in your configuration software.
-3. Load with that fixed `utc_offset`, for example `"UTC+2"`. The data index is UTC.
+3. Build a fixed `datetime.timezone` from that offset and pass it as
+   `fixed_utc_offset_timezone`. The data index is UTC.
 4. Interpret the raw logging start/end using the same fixed offset, then convert
    them to UTC. Convert to your analysis timezone with pandas when needed.
 
 ```python
-from datetime import timezone
+from datetime import timedelta, timezone
 from zoneinfo import ZoneInfo
 
 import pandas as pd
@@ -110,10 +111,8 @@ if any(value is None for value in (last_change_raw, logging_start_raw, logging_e
 # pandas raises if the configuration time is ambiguous or nonexistent.
 configured_local = pd.Timestamp(last_change_raw).tz_localize(ZoneInfo(tz))
 clock_timezone = timezone(configured_local.utcoffset())  # Fixed offset, no DST rules.
-offset_text = configured_local.strftime("%z")  # e.g. "+0200"
-utc_offset = f"UTC{offset_text[:3]}:{offset_text[3:]}"  # e.g. "UTC+02:00"
 
-data = read_cwa_file(path, utc_offset=utc_offset)
+data = read_cwa_file(path, fixed_utc_offset_timezone=clock_timezone)
 logging_start_utc = pd.Timestamp(logging_start_raw).tz_localize(clock_timezone).tz_convert("UTC")
 logging_end_utc = pd.Timestamp(logging_end_raw).tz_localize(clock_timezone).tz_convert("UTC")
 
@@ -133,19 +132,22 @@ If a header time is unset, `read_metadata` returns `None`. Supply a known clock-
 offset if the configuration time is unavailable. Use the sample timestamps for
 actual recording boundaries when scheduled header start/end times are absent.
 
-`utc_offset` uses the usual sign convention: `"UTC+2"` means the device clock is
-two hours ahead of UTC, so sensor time `12:00` becomes `10:00` UTC. `"UTC"` and
-`"UTC+0"` mean zero offset; negative and fractional offsets such as `"UTC-4"` and
-`"UTC+05:45"` are supported. The reader applies the same fixed offset throughout
-full reads, partial reads, and resampling. It does not infer a timezone or offset
-from the file. Without `utc_offset`, the data index remains naive.
+`fixed_utc_offset_timezone` accepts a Python `datetime.timezone` object, such as
+`timezone(timedelta(hours=2))`. This means the device clock is two hours ahead of
+UTC, so sensor time `12:00` becomes `10:00` UTC. Use `timezone.utc` for zero offset;
+negative and fractional offsets such as `timezone(timedelta(hours=-4))` and
+`timezone(timedelta(hours=5, minutes=45))` are supported. Pass a fixed timezone,
+as shown above, rather than a named `ZoneInfo` timezone with DST rules.
+The reader applies the same offset throughout full reads, partial reads, and
+resampling. It does not infer a timezone or offset from the file. Without
+`fixed_utc_offset_timezone`, the data index remains naive.
 
 `read_metadata` and `sampling_consistency_report` always return raw device-clock
 timestamps under `_raw` keys and accept no UTC offset or timezone. Convert those
 values in Python using the same fixed clock offset as the samples.
-`write_cwa_csv` accepts `utc_offset` too. CSV `time` values encode the device clock
-by default and UTC Unix seconds with an offset. Elapsed-second cuts, durations,
-and sampling rates are unchanged.
+`write_cwa_csv` accepts `fixed_utc_offset_timezone` too. CSV `time` values encode
+the device clock by default and UTC Unix seconds with an offset. Elapsed-second
+cuts, durations, and sampling rates are unchanged.
 
 ### Footgun: 24-hour bouts versus local calendar days
 
@@ -209,7 +211,7 @@ for day_start, day_end in zip(day_boundaries[:-1], day_boundaries[1:]):
 
     day_data = read_cwa_file(
         path,
-        utc_offset=utc_offset,
+        fixed_utc_offset_timezone=clock_timezone,
         cut=seconds(start_seconds, end_seconds),
     )
     day_data_local = day_data.tz_convert(tz)
@@ -229,10 +231,11 @@ timezones may repeat a different hour.
 
 `last_change_time_raw` does not distinguish those occurrences, so it cannot
 automatically determine the correct UTC offset. The configuration example raises
-for that ambiguity. Supply a known offset manually, for example `"UTC+2"` for
-the first occurrence in Berlin or `"UTC+1"` for the second, and use the same
-fixed offset when converting the raw header times. Do not guess from recording
-start. Avoid configuring sensors during the repeated hour if you do not have
+for that ambiguity. Supply a known offset manually, for example
+`clock_timezone = timezone(timedelta(hours=2))` for the first occurrence in Berlin
+or `timezone(timedelta(hours=1))` for the second, and use the same fixed offset
+when converting the raw header times. Do not guess from recording start.
+Avoid configuring sensors during the repeated hour if you do not have
 another record of the synchronization time.
 
 ## Usage
@@ -257,7 +260,7 @@ acc_z = data["acc_z"]
 ```
 
 The returned object is a pandas DataFrame with a `DatetimeIndex` named `timestamp`.
-Without `utc_offset`, the index preserves the device clock without
+Without `fixed_utc_offset_timezone`, the index preserves the device clock without
 assigning a timezone. Sensor values are `float32` columns. Timestamps preserve
 the reader's microsecond precision.
 Accelerometer values are in g, gyroscope values are in degrees per second,

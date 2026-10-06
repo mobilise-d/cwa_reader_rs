@@ -1,6 +1,6 @@
 use crate::errors;
 use crate::packet::{cwa_timestamp, packet_meta, read_sector};
-use chrono::{DateTime, FixedOffset, TimeZone, Utc};
+use chrono::{DateTime, TimeZone, Utc};
 use pyo3::prelude::*;
 use serde::Serialize;
 use std::fs::File;
@@ -181,48 +181,6 @@ fn read_cwa_header(file_path: &str) -> Result<CwaHeader, errors::CwaError> {
         gyro_range,
         magnetometer_enabled,
     })
-}
-
-/// Parse the fixed device-clock offset, without inferring a timezone from the file.
-pub(crate) fn parse_utc_offset(utc_offset: Option<&str>) -> PyResult<Option<FixedOffset>> {
-    let Some(value) = utc_offset else {
-        return Ok(None);
-    };
-    let invalid = || {
-        pyo3::exceptions::PyValueError::new_err(format!(
-            "Invalid utc_offset: {value}. Expected UTC, UTC+H, UTC-H, or UTC±HH:MM"
-        ))
-    };
-    let suffix = value.strip_prefix("UTC").ok_or_else(invalid)?;
-    if suffix.is_empty() {
-        return Ok(Some(FixedOffset::east_opt(0).unwrap()));
-    }
-    let (sign, time) = if let Some(time) = suffix.strip_prefix('+') {
-        (1, time)
-    } else if let Some(time) = suffix.strip_prefix('-') {
-        (-1, time)
-    } else {
-        return Err(invalid());
-    };
-    let (hours, minutes) = time.split_once(':').unwrap_or((time, "00"));
-    if hours.is_empty()
-        || hours.len() > 2
-        || minutes.len() != 2
-        || !hours
-            .bytes()
-            .chain(minutes.bytes())
-            .all(|c| c.is_ascii_digit())
-    {
-        return Err(invalid());
-    }
-    let hours: i32 = hours.parse().map_err(|_| invalid())?;
-    let minutes: i32 = minutes.parse().map_err(|_| invalid())?;
-    if minutes >= 60 {
-        return Err(invalid());
-    }
-    FixedOffset::east_opt(sign * (hours * 3600 + minutes * 60))
-        .map(Some)
-        .ok_or_else(invalid)
 }
 
 #[derive(Debug, Clone, Copy)]

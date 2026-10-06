@@ -1,3 +1,4 @@
+from datetime import timedelta, timezone
 from pathlib import Path
 import struct
 
@@ -62,17 +63,20 @@ def _recording(tmp_path: Path, *times: str, configured_at: str | None = None) ->
     return path
 
 
-def test_configuration_offset_can_precede_dst_and_recording_start(tmp_path: Path) -> None:
+def test_configuration_offset_can_precede_dst_and_recording_start(
+    tmp_path: Path,
+) -> None:
     path = _recording(
         tmp_path, "2026-03-30T00:00:00", configured_at="2026-03-28T12:00:00"
     )
     header = read_metadata(str(path))
     assert header["last_change_time_raw"] == "2026-03-28T12:00:00"
-    configured = pd.Timestamp(header["last_change_time_raw"]).tz_localize("Europe/Berlin")
-    offset = configured.strftime("%z")
-    utc_offset = f"UTC{offset[:3]}:{offset[3:]}"
+    configured = pd.Timestamp(header["last_change_time_raw"]).tz_localize(
+        "Europe/Berlin"
+    )
+    clock_timezone = timezone(configured.utcoffset())
 
-    data = read_cwa_file(str(path), utc_offset=utc_offset)
+    data = read_cwa_file(str(path), fixed_utc_offset_timezone=clock_timezone)
 
     assert data.index[0] == pd.Timestamp("2026-03-29T23:00:00Z")
     assert data.tz_convert("Europe/Berlin").index[0] == pd.Timestamp(
@@ -102,19 +106,19 @@ def test_metadata_distinguishes_scheduled_bounds_from_actual_sample_times(
 
 
 @pytest.mark.parametrize(
-    "start,after_change,utc_offset,expected_start_utc,expected_after_local",
+    "start,after_change,clock_timezone,expected_start_utc,expected_after_local",
     [
         (
             "2026-03-29T00:00:00",
             "2026-03-29T03:00:00",
-            "UTC+1",
+            timezone(timedelta(hours=1)),
             "2026-03-28T23:00:00Z",
             "2026-03-29T04:00:00+02:00",
         ),
         (
             "2026-10-25T00:00:00",
             "2026-10-25T03:00:00",
-            "UTC+2",
+            timezone(timedelta(hours=2)),
             "2026-10-24T22:00:00Z",
             "2026-10-25T02:00:00+01:00",
         ),
@@ -124,12 +128,12 @@ def test_utc_offset_stays_fixed_across_dst(
     tmp_path: Path,
     start: str,
     after_change: str,
-    utc_offset: str,
+    clock_timezone: timezone,
     expected_start_utc: str,
     expected_after_local: str,
 ) -> None:
     path = _recording(tmp_path, start, after_change)
-    data = read_cwa_file(str(path), utc_offset=utc_offset)
+    data = read_cwa_file(str(path), fixed_utc_offset_timezone=clock_timezone)
 
     assert str(data.index.tz) == "UTC"
     assert data.index[0] == pd.Timestamp(expected_start_utc)
@@ -138,13 +142,13 @@ def test_utc_offset_stays_fixed_across_dst(
     assert (data.index[20] - data.index[0]).total_seconds() == 3 * 3600
 
 
-@pytest.mark.parametrize("utc_offset", [None, "UTC+1"])
+@pytest.mark.parametrize("clock_timezone", [None, timezone(timedelta(hours=1))])
 def test_metadata_and_report_stay_raw_while_data_and_csv_use_offset(
     tmp_path: Path,
-    utc_offset: str | None,
+    clock_timezone: timezone | None,
 ) -> None:
     path = _recording(tmp_path, "2026-03-29T00:00:00", "2026-03-29T03:00:00")
-    kwargs = {"utc_offset": utc_offset}
+    kwargs = {"fixed_utc_offset_timezone": clock_timezone}
     data = read_cwa_file(str(path), **kwargs)
     header = read_metadata(str(path))
     report = sampling_consistency_report(str(path))
@@ -179,16 +183,23 @@ def test_partial_reads_and_csv_retain_fixed_utc_offset(
     path = _recording(tmp_path, "2026-03-29T00:00:00", "2026-03-29T03:00:00")
     options = {"cut": cut, "resample_hz": resample_hz}
     naive = read_cwa_file(str(path), **options)
-    utc = read_cwa_file(str(path), utc_offset="UTC+1", **options)
+    utc = read_cwa_file(
+        str(path), fixed_utc_offset_timezone=timezone(timedelta(hours=1)), **options
+    )
     expected = naive.copy()
     expected.index = (
-        (naive.index - pd.Timedelta(hours=1)).tz_localize("UTC").as_unit("us")
+        (naive.index - pd.Timedelta(hours=1)).tz_localize(timezone.utc).as_unit("us")
     )
     pd.testing.assert_frame_equal(utc, expected)
     assert utc.index[0] == pd.Timestamp("2026-03-29T02:00:00Z")
 
     output = tmp_path / "partial.csv"
-    write_cwa_csv(str(path), str(output), utc_offset="UTC+1", **options)
+    write_cwa_csv(
+        str(path),
+        str(output),
+        fixed_utc_offset_timezone=timezone(timedelta(hours=1)),
+        **options,
+    )
     assert pd.read_csv(output)["time"].to_numpy() == pytest.approx(
         utc.index.as_unit("us").asi8 / 1_000_000,
         abs=0.0001,
@@ -197,45 +208,52 @@ def test_partial_reads_and_csv_retain_fixed_utc_offset(
 
 
 @pytest.mark.parametrize(
-    "start,utc_offset,expected_utc",
+    "start,clock_timezone,expected_utc",
     [
-        ("2026-10-25T02:30:00", "UTC+2", "2026-10-25T00:30:00Z"),
-        ("2026-03-29T02:30:00", "UTC+1", "2026-03-29T01:30:00Z"),
+        ("2026-10-25T02:30:00", timezone(timedelta(hours=2)), "2026-10-25T00:30:00Z"),
+        ("2026-03-29T02:30:00", timezone(timedelta(hours=1)), "2026-03-29T01:30:00Z"),
     ],
 )
 def test_fixed_offset_accepts_device_times_in_local_dst_gaps_and_overlaps(
-    tmp_path: Path, start: str, utc_offset: str, expected_utc: str
+    tmp_path: Path, start: str, clock_timezone: timezone, expected_utc: str
 ) -> None:
     path = _recording(tmp_path, start)
-    assert read_cwa_file(str(path), utc_offset=utc_offset).index[0] == pd.Timestamp(
-        expected_utc
-    )
-
-
-@pytest.mark.parametrize("utc_offset", ["Europe/Berlin", "UTC+24", "UTC+01:60"])
-def test_invalid_utc_offset_is_rejected(utc_offset: str) -> None:
-    with pytest.raises(ValueError, match="Invalid utc_offset"):
-        read_cwa_file(str(SOURCE), utc_offset=utc_offset)
+    assert read_cwa_file(str(path), fixed_utc_offset_timezone=clock_timezone).index[
+        0
+    ] == pd.Timestamp(expected_utc)
 
 
 @pytest.mark.parametrize(
-    "utc_offset,expected_utc",
+    "clock_timezone,expected_utc",
     [
-        ("UTC", "2026-07-01T00:00:00Z"),
-        ("UTC+0", "2026-07-01T00:00:00Z"),
-        ("UTC-00:30", "2026-07-01T00:30:00Z"),
-        ("UTC-4", "2026-07-01T04:00:00Z"),
-        ("UTC+05:45", "2026-06-30T18:15:00Z"),
+        (timezone.utc, "2026-07-01T00:00:00Z"),
+        (timezone(timedelta(minutes=-30)), "2026-07-01T00:30:00Z"),
+        (timezone(timedelta(hours=-4)), "2026-07-01T04:00:00Z"),
+        (timezone(timedelta(hours=5, minutes=45)), "2026-06-30T18:15:00Z"),
+        (
+            timezone(timedelta(seconds=30, microseconds=123456)),
+            "2026-06-30T23:59:29.876544Z",
+        ),
+        (
+            timezone(timedelta(seconds=-30, microseconds=-123456)),
+            "2026-07-01T00:00:30.123456Z",
+        ),
     ],
 )
 def test_utc_offset_supports_zero_negative_and_fractional_offsets(
     tmp_path: Path,
-    utc_offset: str,
+    clock_timezone: timezone,
     expected_utc: str,
 ) -> None:
     path = _recording(tmp_path, "2026-07-01T00:00:00")
-    assert read_cwa_file(str(path), utc_offset=utc_offset).index[0] == pd.Timestamp(
-        expected_utc
+    data = read_cwa_file(str(path), fixed_utc_offset_timezone=clock_timezone)
+    assert data.index[0] == pd.Timestamp(expected_utc)
+    assert str(data.index.tz) == "UTC"
+
+    output = tmp_path / "offset.csv"
+    write_cwa_csv(str(path), str(output), fixed_utc_offset_timezone=clock_timezone)
+    assert pd.read_csv(output)["time"].iloc[0] == pytest.approx(
+        pd.Timestamp(expected_utc).timestamp(), abs=0.0001, rel=0
     )
 
 
@@ -246,9 +264,9 @@ def test_fixed_offset_does_not_require_configuration_time(tmp_path: Path) -> Non
     path.write_bytes(contents)
 
     assert read_metadata(str(path))["last_change_time_raw"] is None
-    assert read_cwa_file(str(path), utc_offset="UTC+1").index[0] == pd.Timestamp(
-        "2026-03-29T23:00:00Z"
-    )
+    assert read_cwa_file(
+        str(path), fixed_utc_offset_timezone=timezone(timedelta(hours=1))
+    ).index[0] == pd.Timestamp("2026-03-29T23:00:00Z")
 
 
 def test_header_only_metadata_returns_raw_times_and_no_sample_bounds(
