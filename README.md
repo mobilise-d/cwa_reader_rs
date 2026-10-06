@@ -9,6 +9,9 @@
 
 It was created to provide a fast, small, and easier-to-distribute loader that integrates well with [mobgap](https://github.com/mobilise-d/mobgap). The port is mostly agent-generated and tested for correctness using multiple example files, including parity checks against the original Open Movement C implementation. Full-file reads are expected to match the C output, aside from the C CSV export's millisecond timestamp formatting tolerance; partial reads deliberately preserve full-read timestamp consistency. See [Comparison To The C Reference](#comparison-to-the-c-reference) for details.
 
+Read [Timezone handling](#timezone-handling) before analysing recording times,
+especially when a recording or a scheduled start spans a daylight saving change.
+
 ## Installation
 
 Install from PyPI with `uv`:
@@ -38,6 +41,192 @@ uv pip install -e .
 ```
 
 Because this package contains a Rust extension module built with [maturin](https://www.maturin.rs/), local source installs may require a working Rust toolchain. Install Rust with [rustup](https://rustup.rs/) if your platform does not have a pre-built wheel available.
+
+## Timezone handling
+
+AX3/AX6 sensors do not store timezone-aware sample timestamps. During normal
+configuration, the sensor synchronizes its clock with the local time of the
+computer used to configure it. The header's `lastChangeTime` field records the
+last metadata/configuration write. `read_header` exposes this as
+`last_change_time_raw`. In the usual configuration workflow, this is also when
+the clock was last synchronized, but it is not a dedicated clock-sync log.
+
+> **IF YOU ARE NOT USING THE DEFAULT AX6 CONFIGURATION SOFTWARE, DOUBLE-CHECK
+> THAT `last_change_time_raw` ALSO REPRESENTS THE LAST CLOCK SYNCHRONIZATION.**
+
+The sensor clock counts seconds forward from synchronization. It does not adjust
+for daylight saving time or later timezone changes on the configuring computer.
+Sample timestamps, configured start/stop times, and scheduled triggers such as
+"start at midnight" therefore continue to use the UTC offset that applied when
+the clock was synchronized. See the
+[AX3/AX6 time-zone FAQ](https://github.com/openmovementproject/openmovement/blob/master/Docs/ax3/ax3-faq.md#time-zone-and-dst).
+
+This affects the local start and end of a recording:
+
+- A recording scheduled from midnight to midnight across a DST change follows
+  the sensor clock. A 24-hour recording starting at midnight before Berlin's
+  spring change ends at 01:00 local time the next day. Across the autumn change,
+  it ends at 23:00 local time on the same calendar date. A recording spanning
+  several days can likewise finish one hour later or earlier than local midnight.
+- If DST changes between configuration and a scheduled future start, a trigger
+  for sensor-clock midnight can occur at 01:00 or 23:00 local time instead.
+
+Convert both sample timestamps and the raw start/stop times to UTC or local time
+before analysis. Conversion gives the actual timing of the recorded data; it
+cannot recover an hour the sensor did not record or change when a trigger fired.
+Use the offset at clock synchronization, even when recording starts days later.
+
+### Load in UTC and convert header times
+
+For a scheduled recording, use this workflow:
+
+1. Read `last_change_time_raw`, `logging_start_time_raw`, and
+   `logging_end_time_raw` from the header. These are the unaltered sensor-clock
+   values, represented as naive ISO 8601 strings.
+2. Use Python's [`zoneinfo`](https://docs.python.org/3/library/zoneinfo.html) and pandas to determine the configuration timezone's
+   offset at `last_change_time_raw`. This assumes configuration also synchronized
+   the clock. Check that assumption in your configuration software.
+3. Load with that fixed `utc_offset`, for example `"UTC+2"`. The data index is UTC.
+4. Interpret the raw logging start/end using the same fixed offset, then convert
+   them to UTC. Convert to your analysis timezone with pandas when needed.
+
+```python
+from datetime import timezone
+from zoneinfo import ZoneInfo
+
+import pandas as pd
+from cwa_reader_rs import read_cwa_file, read_header
+
+path = "recording.cwa"
+tz = "Europe/Berlin"  # Timezone of the computer that synchronized the sensor.
+header = read_header(path)
+last_change_raw = header["last_change_time_raw"]
+logging_start_raw = header["logging_start_time_raw"]
+logging_end_raw = header["logging_end_time_raw"]
+if any(value is None for value in (last_change_raw, logging_start_raw, logging_end_raw)):
+    raise ValueError("This example requires configuration and scheduled start/end times")
+
+# ASSUMPTION: last metadata change = last clock synchronization.
+# pandas raises if the configuration time is ambiguous or nonexistent.
+configured_local = pd.Timestamp(last_change_raw).tz_localize(ZoneInfo(tz))
+clock_timezone = timezone(configured_local.utcoffset())  # Fixed offset, no DST rules.
+offset_text = configured_local.strftime("%z")  # e.g. "+0200"
+utc_offset = f"UTC{offset_text[:3]}:{offset_text[3:]}"  # e.g. "UTC+02:00"
+
+data = read_cwa_file(path, utc_offset=utc_offset)
+logging_start_utc = pd.Timestamp(logging_start_raw).tz_localize(clock_timezone).tz_convert("UTC")
+logging_end_utc = pd.Timestamp(logging_end_raw).tz_localize(clock_timezone).tz_convert("UTC")
+
+# Optional local-time analysis. tz_convert applies the timezone's DST rules.
+data_local = data.tz_convert(tz)
+logging_start_local = logging_start_utc.tz_convert(tz)
+logging_end_local = logging_end_utc.tz_convert(tz)
+```
+
+Do not localize the raw logging start/end directly with `Europe/Berlin` or another
+named timezone. Its offset at recording start or stop may differ from the sensor's
+fixed offset. First interpret them using `clock_timezone` as shown above.
+For a DataFrame index, use `data.tz_convert(tz)`; `.dt.tz_convert(tz)` is for a
+Series of datetime values.
+
+If a header time is unset, `read_header` returns `None`. Supply a known clock-sync
+offset if the configuration time is unavailable. Use the sample timestamps for
+actual recording boundaries when scheduled header start/end times are absent.
+
+`utc_offset` uses the usual sign convention: `"UTC+2"` means the device clock is
+two hours ahead of UTC, so sensor time `12:00` becomes `10:00` UTC. `"UTC"` and
+`"UTC+0"` mean zero offset; negative and fractional offsets such as `"UTC-4"` and
+`"UTC+05:45"` are supported. The reader applies the same fixed offset throughout
+full reads, partial reads, and resampling. It does not infer a timezone or offset
+from the file. Without `utc_offset`, the data index remains naive.
+
+`read_header` always returns raw device-clock values and accepts no offset.
+`sampling_consistency_report` and `write_cwa_csv` accept `utc_offset` too. Report
+timestamps are naive ISO 8601 strings by default and UTC RFC 3339 strings when an
+offset is supplied. CSV `time` values encode the device clock by default and UTC
+Unix seconds with an offset. Elapsed-second cuts, durations, and sampling rates
+are unchanged.
+
+### Footgun: 24-hour bouts versus local calendar days
+
+Decide whether a "day" means 24 elapsed hours or a date on the local calendar.
+`seconds(0, 86400)` selects a 24-hour bout. A local calendar day runs between
+consecutive local midnights and may contain 23 or 25 hours at a DST change.
+
+For example, in `Europe/Berlin`:
+
+| Local calendar day | Elapsed hours | Elapsed seconds |
+| --- | ---: | ---: |
+| 2026-03-29, spring DST change | 23 | 82,800 |
+| 2026-10-25, autumn DST change | 25 | 90,000 |
+
+Define day boundaries in the local timezone, then subtract timezone-aware pandas
+timestamps to calculate elapsed seconds. pandas accounts for DST in that
+subtraction. Advance calendar days with `freq="D"` or `pd.DateOffset(days=1)`;
+adding `pd.Timedelta(hours=24)` instead advances exactly 24 elapsed hours.
+
+The loader's `seconds(...)` offsets are relative to the first valid sample,
+which can arrive after the configured `logging_start_local`. The header contains
+the scheduled start, not the measured first-sample time, and that scheduled value
+can be unset. Header information alone therefore does not determine the exact
+origin of a seconds cut. `sampling_consistency_report` provides `start_from_data`
+by scanning packet metadata without decoding sample values. You can use it to
+choose cuts without first loading all samples.
+
+The example below first calculates offsets from the converted logging start,
+then subtracts the delay to the first sample. It continues from the previous
+example and clips partial first and last days to the configured recording interval.
+
+```python
+from cwa_reader_rs import sampling_consistency_report, seconds
+
+# Local midnights, including the boundary after the final recording date.
+day_boundaries = pd.date_range(
+    start=logging_start_local.normalize(),
+    end=logging_end_local.normalize() + pd.DateOffset(days=1),
+    freq="D",
+)
+report = sampling_consistency_report(path, utc_offset=utc_offset)
+first_sample_local = pd.Timestamp(report["start_from_data"]).tz_convert(tz)
+first_sample_delay = (first_sample_local - logging_start_local).total_seconds()
+
+for day_start, day_end in zip(day_boundaries[:-1], day_boundaries[1:]):
+    start_local = max(day_start, logging_start_local)
+    end_local = min(day_end, logging_end_local)
+    start_seconds = max(
+        0.0, (start_local - logging_start_local).total_seconds() - first_sample_delay
+    )
+    end_seconds = (end_local - logging_start_local).total_seconds() - first_sample_delay
+    if end_seconds <= start_seconds:
+        continue
+
+    day_data = read_cwa_file(
+        path,
+        utc_offset=utc_offset,
+        cut=seconds(start_seconds, end_seconds),
+    )
+    day_data_local = day_data.tz_convert(tz)
+    # Analyse day_data_local for the calendar date day_start.date().
+```
+
+For complete local days, the cut spans 82,800 or 90,000 seconds on the Berlin DST
+transition dates above. Adjacent cuts meet at the same local midnight; the loader
+uses an exclusive end, so a sample at midnight belongs to the following day.
+
+### Footgun: configuration during a repeated local hour
+
+When clocks move backward, some local timestamps occur twice. In Berlin's autumn
+change, the interval from 02:00 up to 03:00 repeats. A raw configuration time of
+`02:30` could mean the first occurrence at UTC+2 or the second at UTC+1. Other
+timezones may repeat a different hour.
+
+`last_change_time_raw` does not distinguish those occurrences, so it cannot
+automatically determine the correct UTC offset. The configuration example raises
+for that ambiguity. Supply a known offset manually, for example `"UTC+2"` for
+the first occurrence in Berlin or `"UTC+1"` for the second, and use the same
+fixed offset when converting the raw header times. Do not guess from recording
+start. Avoid configuring sensors during the repeated hour if you do not have
+another record of the synchronization time.
 
 ## Usage
 
@@ -78,71 +267,6 @@ This is a breaking change before 1.0: use `data.index` for timestamps and
 `data[column].to_numpy()` when a NumPy array is needed. Check for optional channel
 columns before accessing them, for example `if "gyro_x" in data.columns:`.
 CSV exports follow the same rule and omit columns for absent channels.
-
-### Device clock and UTC offsets
-
-The AX device copies the configuring computer's local time when its clock is
-synchronized. It then continues on that clock without adjusting for daylight
-saving, even if a DST change occurs before recording starts. See the
-[AX3/AX6 time-zone FAQ](https://github.com/openmovementproject/openmovement/blob/master/Docs/ax3/ax3-faq.md#time-zone-and-dst).
-
-The reader accepts an explicit, fixed `utc_offset`, such as `"UTC+2"`,
-`"UTC-4"`, or `"UTC+05:45"`. A positive offset means the device clock is ahead of
-UTC: `"UTC+2"` converts device time `12:00` to `10:00` UTC. `"UTC"` and `"UTC+0"`
-represent a clock already set to UTC. The offset is applied to every timestamp,
-including partial reads and resampling, and the returned index is UTC-aware.
-The reader does not resolve named timezones or infer an offset from the file.
-
-For a device configured using local time, we recommend this workflow:
-
-1. Read `last_change_time_raw` with `read_header`. Assume that this
-   was also the last clock synchronization time only after checking your
-   configuration software. The field records the last metadata write, which
-   can differ from the last clock synchronization.
-2. Use the configuration timezone to calculate its UTC offset at that timestamp.
-3. Pass that fixed offset to `read_cwa_file`, for example `utc_offset="UTC+2"`.
-4. Convert the UTC index to your timezone with `data.tz_convert(tz)`.
-
-```python
-import pandas as pd
-from cwa_reader_rs import read_cwa_file, read_header
-
-path = "recording.cwa"
-tz = "Europe/Berlin"  # Timezone of the computer that synchronized the clock.
-metadata = read_header(path)
-configured_at = metadata["last_change_time_raw"]
-if configured_at is None:
-    raise ValueError("Configuration time is missing; supply the device-clock UTC offset")
-
-# Assumes the last metadata write also synchronized the device clock.
-configured = pd.Timestamp(configured_at).tz_localize(tz)
-offset = configured.strftime("%z")  # e.g. "+0200"
-utc_offset = f"UTC{offset[:3]}:{offset[3:]}"  # e.g. "UTC+02:00"
-
-data = read_cwa_file(path, utc_offset=utc_offset)
-assert str(data.index.tz) == "UTC"
-localised = data.tz_convert(tz)
-```
-
-Using the offset at configuration time avoids a one-hour error when configuration
-and recording start fall on opposite sides of a DST change. Converting the UTC
-index to a local timezone applies that timezone's DST rules, including skipped
-or repeated local hours. For a DataFrame index, use `tz_convert`; `.dt.tz_convert`
-is for a datetime Series.
-
-If `last_change_time_raw` does not represent clock synchronization, supply the offset
-that actually applied when the clock was synchronized. If that local timestamp
-falls in a repeated hour, resolve the ambiguity explicitly in pandas using your
-configuration information. The example raises for ambiguous or nonexistent local
-times rather than guessing.
-
-With `utc_offset=None`, no timezone is assigned and the index remains naive.
-`sampling_consistency_report` and `write_cwa_csv` accept the same keyword.
-Report timestamps are naive ISO 8601 strings by default and UTC RFC 3339 strings
-when an offset is supplied. `read_header` always returns raw device-clock times
-and accepts no offset. CSV `time` values remain numeric
-seconds: they encode the device clock by default and UTC Unix time with an offset.
-Durations, elapsed-second cuts, and sampling rates do not change.
 
 The datetime index uses `datetime64[us]`, or `datetime64[us, UTC]`, with 8 bytes
 per timestamp. It wraps the transferred timestamp buffer without copying it;
