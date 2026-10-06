@@ -1511,12 +1511,9 @@ fn find_previous_packet_end(file: &mut File, start_block: usize) -> Result<Optio
     Ok(None)
 }
 
-/// Convert CwaDataResult to Python dictionary with NumPy arrays (zero-copy)
-fn create_python_dict_numpy(py: Python, data: CwaDataResult) -> PyResult<Py<PyAny>> {
+/// Transfer sample columns to pandas with the device clock as a datetime index.
+fn create_python_dataframe(py: Python, data: CwaDataResult) -> PyResult<Py<PyAny>> {
     let dict = PyDict::new(py);
-
-    // Convert timestamps to NumPy array (zero-copy transfer)
-    dict.set_item("timestamp", data.timestamps.into_pyarray(py))?;
 
     // Convert sensor data to NumPy arrays (zero-copy transfer)
     dict.set_item("acc_x", data.acc_x.into_pyarray(py))?;
@@ -1554,7 +1551,24 @@ fn create_python_dict_numpy(py: Python, data: CwaDataResult) -> PyResult<Py<PyAn
         dict.set_item("battery", battery_levels.into_pyarray(py))?;
     }
 
-    Ok(dict.into())
+    let pandas = py.import("pandas")?;
+    let datetime_kwargs = PyDict::new(py);
+    datetime_kwargs.set_item("name", "timestamp")?;
+    datetime_kwargs.set_item("copy", false)?;
+    let timestamps = data
+        .timestamps
+        .into_pyarray(py)
+        .call_method1("view", ("datetime64[us]",))?;
+    let index = pandas
+        .getattr("DatetimeIndex")?
+        .call((timestamps,), Some(&datetime_kwargs))?;
+    let dataframe_kwargs = PyDict::new(py);
+    dataframe_kwargs.set_item("index", index)?;
+    dataframe_kwargs.set_item("copy", false)?;
+    Ok(pandas
+        .getattr("DataFrame")?
+        .call((dict,), Some(&dataframe_kwargs))?
+        .unbind())
 }
 
 fn csv_header(options: &CwaParsingOptions, channels: SensorChannels) -> Vec<&'static str> {
@@ -1760,7 +1774,10 @@ pub fn blocks(py: Python, start: Option<usize>, end: Option<usize>) -> PyResult<
 
 /// Python interface for reading CWA data.
 ///
-/// Gyro and magnetometer keys are included only when present in the selected
+/// Returns a pandas DataFrame with a timezone-naive DatetimeIndex named
+/// `timestamp`. Numeric channel columns retain their float32 dtype.
+///
+/// Gyro and magnetometer columns are included only when present in the selected
 /// samples. Recorded zero measurements remain present; missing samples in a
 /// present channel are NaN.
 ///
@@ -1815,7 +1832,7 @@ pub fn read_cwa_file(
         read_cwa_data(file_path, plan.start_block, plan.num_blocks, Some(options))
             .and_then(|data| filter_data_by_time_range(data, plan.time_range))
     } {
-        Ok(data) => create_python_dict_numpy(py, data),
+        Ok(data) => create_python_dataframe(py, data),
         Err(e) => Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
             e.to_string(),
         )),

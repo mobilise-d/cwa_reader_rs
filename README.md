@@ -24,7 +24,7 @@ uv pip install cwa-reader-rs
 ```
 
 With pip, use `python -m pip install cwa-reader-rs`. Python 3.10 or newer and
-NumPy are required; the package installer installs NumPy automatically.
+NumPy and pandas are required; the package installer installs them automatically.
 
 ### Local Development
 
@@ -54,26 +54,29 @@ data = read_cwa_file(
     include_battery=False,
 )
 
-timestamps_us = data["timestamp"]
+timestamps = data.index
 acc_x = data["acc_x"]
 acc_y = data["acc_y"]
 acc_z = data["acc_z"]
 ```
 
-The returned object is a dictionary of NumPy arrays. Timestamps are integer Unix timestamps in microseconds.
+The returned object is a pandas DataFrame with a `DatetimeIndex` named `timestamp`.
+The index preserves the device clock without assigning a timezone. Sensor values
+are `float32` columns. Timestamps preserve the reader's microsecond precision.
 Accelerometer values are in g, gyroscope values are in degrees per second,
 temperature is in degrees Celsius, and battery is in volts. When a recording
 does not contain a gyro or magnetometer channel in the selected samples, that
-channel's key is omitted. Channel presence comes from the recorded packet layout;
+channel's column is omitted. Channel presence comes from the recorded packet layout;
 channels with real zero measurements remain present. Set `include_magnetometer=False`
-to omit magnetometer arrays even when recorded. If packet layouts change within a
+to omit magnetometer columns even when recorded. If packet layouts change within a
 selection, missing samples in a present channel are `NaN`. Resampling retains
 channels recorded in the selected source samples even when no output timestamp
-has a valid interpolated value; such arrays contain `NaN`.
+has a valid interpolated value; such columns contain `NaN`.
 
-This is a breaking change before 1.0. Check for optional channel keys before
-accessing them, for example `if "gyro_x" in data:`. CSV exports follow the same
-rule and omit columns for absent channels.
+This is a breaking change before 1.0: use `data.index` for timestamps and
+`data[column].to_numpy()` when a NumPy array is needed. Check for optional channel
+columns before accessing them, for example `if "gyro_x" in data.columns:`.
+CSV exports follow the same rule and omit columns for absent channels.
 
 ### Header Read
 
