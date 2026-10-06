@@ -7,7 +7,7 @@ import pytest
 from cwa_reader_rs import (
     blocks,
     read_cwa_file,
-    read_header,
+    read_metadata,
     sampling_consistency_report,
     seconds,
     write_cwa_csv,
@@ -66,7 +66,7 @@ def test_configuration_offset_can_precede_dst_and_recording_start(tmp_path: Path
     path = _recording(
         tmp_path, "2026-03-30T00:00:00", configured_at="2026-03-28T12:00:00"
     )
-    header = read_header(str(path))
+    header = read_metadata(str(path))
     assert header["last_change_time_raw"] == "2026-03-28T12:00:00"
     configured = pd.Timestamp(header["last_change_time_raw"]).tz_localize("Europe/Berlin")
     offset = configured.strftime("%z")
@@ -77,6 +77,27 @@ def test_configuration_offset_can_precede_dst_and_recording_start(tmp_path: Path
     assert data.index[0] == pd.Timestamp("2026-03-29T23:00:00Z")
     assert data.tz_convert("Europe/Berlin").index[0] == pd.Timestamp(
         "2026-03-30T01:00:00+02:00"
+    )
+
+
+def test_metadata_distinguishes_scheduled_bounds_from_actual_sample_times(
+    tmp_path: Path,
+) -> None:
+    path = _recording(tmp_path, "2026-03-29T00:00:02", "2026-03-29T00:00:12")
+    contents = bytearray(path.read_bytes())
+    struct.pack_into("<I", contents, 13, _timestamp_bits("2026-03-29T00:00:00"))
+    struct.pack_into("<I", contents, 17, _timestamp_bits("2026-03-29T00:00:15"))
+    path.write_bytes(contents)
+
+    metadata = read_metadata(str(path))
+
+    assert metadata["logging_start_time_raw"] == "2026-03-29T00:00:00"
+    assert metadata["logging_end_time_raw"] == "2026-03-29T00:00:15"
+    assert pd.Timestamp(metadata["start_from_data_raw"]) == pd.Timestamp(
+        "2026-03-29T00:00:02"
+    )
+    assert pd.Timestamp(metadata["end_from_data_raw"]) == pd.Timestamp(
+        "2026-03-29T00:00:12.190"
     )
 
 
@@ -118,14 +139,14 @@ def test_utc_offset_stays_fixed_across_dst(
 
 
 @pytest.mark.parametrize("utc_offset", [None, "UTC+1"])
-def test_header_stays_raw_while_report_and_csv_use_utc_offset(
+def test_metadata_stays_raw_while_report_and_csv_use_utc_offset(
     tmp_path: Path,
     utc_offset: str | None,
 ) -> None:
     path = _recording(tmp_path, "2026-03-29T00:00:00", "2026-03-29T03:00:00")
     kwargs = {"utc_offset": utc_offset}
     data = read_cwa_file(str(path), **kwargs)
-    header = read_header(str(path))
+    header = read_metadata(str(path))
     report = sampling_consistency_report(str(path), **kwargs)
 
     assert header["logging_start_time_raw"] == "2026-03-29T00:00:00"
@@ -224,22 +245,24 @@ def test_fixed_offset_does_not_require_configuration_time(tmp_path: Path) -> Non
     struct.pack_into("<I", contents, 37, 0)
     path.write_bytes(contents)
 
-    assert read_header(str(path))["last_change_time_raw"] is None
+    assert read_metadata(str(path))["last_change_time_raw"] is None
     assert read_cwa_file(str(path), utc_offset="UTC+1").index[0] == pd.Timestamp(
         "2026-03-29T23:00:00Z"
     )
 
 
 @pytest.mark.parametrize("utc_offset", [None, "UTC+1"])
-def test_header_only_recording_returns_raw_times_and_report_uses_offset(
+def test_header_only_metadata_returns_raw_times_and_no_sample_bounds(
     tmp_path: Path,
     utc_offset: str | None,
 ) -> None:
     path = _recording(tmp_path, "2026-03-29T00:00:00")
     path.write_bytes(path.read_bytes()[:1024])
-    header = read_header(str(path))
+    header = read_metadata(str(path))
     expected = "2026-03-28T23:00:00Z" if utc_offset else "2026-03-29T00:00:00"
     assert header["logging_start_time_raw"] == "2026-03-29T00:00:00"
+    assert header["start_from_data_raw"] is None
+    assert header["end_from_data_raw"] is None
     report = sampling_consistency_report(str(path), utc_offset=utc_offset)
     assert report["start_from_data"] is None
     assert report["end_from_data"] is None

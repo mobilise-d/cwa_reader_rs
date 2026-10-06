@@ -47,7 +47,7 @@ Because this package contains a Rust extension module built with [maturin](https
 AX3/AX6 sensors do not store timezone-aware sample timestamps. During normal
 configuration, the sensor synchronizes its clock with the local time of the
 computer used to configure it. The header's `lastChangeTime` field records the
-last metadata/configuration write. `read_header` exposes this as
+last metadata/configuration write. `read_metadata` exposes this as
 `last_change_time_raw`. In the usual configuration workflow, this is also when
 the clock was last synchronized, but it is not a dedicated clock-sync log.
 
@@ -95,14 +95,14 @@ from datetime import timezone
 from zoneinfo import ZoneInfo
 
 import pandas as pd
-from cwa_reader_rs import read_cwa_file, read_header
+from cwa_reader_rs import read_cwa_file, read_metadata
 
 path = "recording.cwa"
 tz = "Europe/Berlin"  # Timezone of the computer that synchronized the sensor.
-header = read_header(path)
-last_change_raw = header["last_change_time_raw"]
-logging_start_raw = header["logging_start_time_raw"]
-logging_end_raw = header["logging_end_time_raw"]
+metadata = read_metadata(path)
+last_change_raw = metadata["last_change_time_raw"]
+logging_start_raw = metadata["logging_start_time_raw"]
+logging_end_raw = metadata["logging_end_time_raw"]
 if any(value is None for value in (last_change_raw, logging_start_raw, logging_end_raw)):
     raise ValueError("This example requires configuration and scheduled start/end times")
 
@@ -129,7 +129,7 @@ fixed offset. First interpret them using `clock_timezone` as shown above.
 For a DataFrame index, use `data.tz_convert(tz)`; `.dt.tz_convert(tz)` is for a
 Series of datetime values.
 
-If a header time is unset, `read_header` returns `None`. Supply a known clock-sync
+If a header time is unset, `read_metadata` returns `None`. Supply a known clock-sync
 offset if the configuration time is unavailable. Use the sample timestamps for
 actual recording boundaries when scheduled header start/end times are absent.
 
@@ -140,7 +140,7 @@ two hours ahead of UTC, so sensor time `12:00` becomes `10:00` UTC. `"UTC"` and
 full reads, partial reads, and resampling. It does not infer a timezone or offset
 from the file. Without `utc_offset`, the data index remains naive.
 
-`read_header` always returns raw device-clock values and accepts no offset.
+`read_metadata` always returns raw device-clock values and accepts no offset.
 `sampling_consistency_report` and `write_cwa_csv` accept `utc_offset` too. Report
 timestamps are naive ISO 8601 strings by default and UTC RFC 3339 strings when an
 offset is supplied. CSV `time` values encode the device clock by default and UTC
@@ -169,26 +169,33 @@ The loader's `seconds(...)` offsets are relative to the first valid sample,
 which can arrive after the configured `logging_start_local`. The header contains
 the scheduled start, not the measured first-sample time, and that scheduled value
 can be unset. Header information alone therefore does not determine the exact
-origin of a seconds cut. `sampling_consistency_report` provides `start_from_data`
-by scanning packet metadata without decoding sample values. You can use it to
-choose cuts without first loading all samples.
+origin of a seconds cut. `read_metadata` also provides `start_from_data_raw` and
+`end_from_data_raw` by scanning packet metadata without decoding sample values.
+Use those measured timestamps to choose cuts without first loading all samples.
 
 The example below first calculates offsets from the converted logging start,
 then subtracts the delay to the first sample. It continues from the previous
 example and clips partial first and last days to the configured recording interval.
+It stops at the final recorded date, so an early stop does not cause cuts for
+later days with no data.
 
 ```python
-from cwa_reader_rs import sampling_consistency_report, seconds
+from cwa_reader_rs import seconds
 
-# Local midnights, including the boundary after the final recording date.
+first_sample_local = (
+    pd.Timestamp(metadata["start_from_data_raw"]).tz_localize(clock_timezone).tz_convert(tz)
+)
+last_sample_local = (
+    pd.Timestamp(metadata["end_from_data_raw"]).tz_localize(clock_timezone).tz_convert(tz)
+)
+first_sample_delay = (first_sample_local - logging_start_local).total_seconds()
+
+# Local midnights, including the boundary after the final recorded date.
 day_boundaries = pd.date_range(
-    start=logging_start_local.normalize(),
-    end=logging_end_local.normalize() + pd.DateOffset(days=1),
+    start=max(logging_start_local, first_sample_local).normalize(),
+    end=min(logging_end_local, last_sample_local).normalize() + pd.DateOffset(days=1),
     freq="D",
 )
-report = sampling_consistency_report(path, utc_offset=utc_offset)
-first_sample_local = pd.Timestamp(report["start_from_data"]).tz_convert(tz)
-first_sample_delay = (first_sample_local - logging_start_local).total_seconds()
 
 for day_start, day_end in zip(day_boundaries[:-1], day_boundaries[1:]):
     start_local = max(day_start, logging_start_local)
@@ -263,7 +270,8 @@ selection, missing samples in a present channel are `NaN`. Resampling retains
 channels recorded in the selected source samples even when no output timestamp
 has a valid interpolated value; such columns contain `NaN`.
 
-This is a breaking change before 1.0: use `data.index` for timestamps and
+This is a breaking change before 1.0: the metadata function is now `read_metadata`,
+and its time fields use the `_raw` suffix. Use `data.index` for timestamps and
 `data[column].to_numpy()` when a NumPy array is needed. Check for optional channel
 columns before accessing them, for example `if "gyro_x" in data.columns:`.
 CSV exports follow the same rule and omit columns for absent channels.
@@ -273,25 +281,27 @@ per timestamp. It wraps the transferred timestamp buffer without copying it;
 sensor columns also use the transferred NumPy buffers. Importing pandas adds
 process overhead, but the timestamp representation does not add per-sample memory.
 
-### Header Read
+### Metadata read
 
 ```python
-from cwa_reader_rs import read_header
+from cwa_reader_rs import read_metadata
 
-header = read_header("recording.cwa")
+metadata = read_metadata("recording.cwa")
 
-device_id = header["device_id"]
-sample_rate_hz = header["sample_rate_hz"]
-logging_start_time_raw = header["logging_start_time_raw"]
-last_change_time_raw = header["last_change_time_raw"]
+device_id = metadata["device_id"]
+sample_rate_hz = metadata["sample_rate_hz"]
+logging_start_time_raw = metadata["logging_start_time_raw"]
+last_change_time_raw = metadata["last_change_time_raw"]
+first_sample_raw = metadata["start_from_data_raw"]
+last_sample_raw = metadata["end_from_data_raw"]
 ```
 
-The header read returns metadata from the 1024-byte CWA metadata block without decoding sample values. It includes device and session identifiers (`hardware_type`, `device_id`, `session_id`), recording timing fields (`logging_start_time_raw`, `logging_end_time_raw`, `last_change_time_raw`), nominal sensor configuration (`sample_rate_hz`, `accel_range`, `gyro_range`, `magnetometer_enabled`, `firmware_revision`), and the free-form `annotation`.
+The metadata read parses the 1024-byte CWA header and scans packet metadata without decoding sensor values. It includes device and session identifiers (`hardware_type`, `device_id`, `session_id`), recording timing fields (`logging_start_time_raw`, `logging_end_time_raw`, `last_change_time_raw`), nominal sensor configuration (`sample_rate_hz`, `accel_range`, `gyro_range`, `magnetometer_enabled`, `firmware_revision`), and the free-form `annotation`. It also returns the first and last actual sample timestamps as `start_from_data_raw` and `end_from_data_raw`, including packet sample offsets and continuity correction. These can differ from the configured logging start/end and are `None` when no samples exist.
 
 The `_raw` time fields are timezone-naive ISO 8601 strings when present, or `None`
 when unset. They decode the unaltered time values recorded by the sensor, without
 applying any UTC offset or timezone conversion. These values need conversion to
-UTC or local time for most analysis steps. `read_header` accepts no offset.
+UTC or local time for most analysis steps. `read_metadata` accepts no offset.
 `last_change_time_raw` records the last metadata write and may differ from the last
 clock synchronization. Check your configuration software before using it to
 derive the UTC offset as shown above.
@@ -328,7 +338,7 @@ In addition to the RTC, the underlying movement sensor has its own sample timing
 Without additional external timing information, this report cannot determine whether an inconsistency comes from RTC drift, sample-clock drift, delayed start/stop behavior, or file conversion artifacts.
 For most AX6 workflows, the RTC-derived recording duration should be treated as the authoritative time span, and resampling should adjust the sample grid rather than forcing duration from sample count.
 
-When a fixed-rate downstream pipeline is required, use `resample_hz=report["samplingrate_hz_from_header"]` or `resample_hz=read_header("recording.cwa")["sample_rate_hz"]` and let the reader resample from the data-derived timestamps.
+When a fixed-rate downstream pipeline is required, use `resample_hz=report["samplingrate_hz_from_header"]` or `resample_hz=read_metadata("recording.cwa")["sample_rate_hz"]` and let the reader resample from the data-derived timestamps.
 
 ### Partial Block Read
 
@@ -375,9 +385,9 @@ Without resampling, a seconds cut returns original samples only. If `start` fall
 ### Resample
 
 ```python
-from cwa_reader_rs import read_cwa_file, read_header
+from cwa_reader_rs import read_cwa_file, read_metadata
 
-expected_sampling_rate = read_header("recording.cwa")["sample_rate_hz"]
+expected_sampling_rate = read_metadata("recording.cwa")["sample_rate_hz"]
 
 data = read_cwa_file(
     "recording.cwa",

@@ -387,16 +387,22 @@ pub fn sampling_consistency_report(
     Ok(report.into())
 }
 
-/// Read CWA metadata without applying timezone or UTC-offset conversion.
+/// Read CWA header and sample timing metadata without timezone conversion.
+/// Scans packet metadata without decoding sensor values.
 /// `logging_start_time_raw`, `logging_end_time_raw`, and `last_change_time_raw`
 /// are naive ISO 8601 strings preserving the unaltered sensor clock values,
 /// or None when unset. Convert them to UTC or local time for most analysis.
+/// `start_from_data_raw` and `end_from_data_raw` are the first and last actual
+/// sample timestamps, including packet sample offsets and continuity correction,
+/// or None when no valid samples exist. Seconds cuts start at `start_from_data_raw`.
 /// `last_change_time_raw` records the last metadata write, which need not be
 /// the last clock synchronization; check your configuration software.
 #[pyfunction]
-pub fn read_header(py: Python, file_path: &str) -> PyResult<Py<PyAny>> {
+pub fn read_metadata(py: Python, file_path: &str) -> PyResult<Py<PyAny>> {
     match read_cwa_header(file_path) {
         Ok(header) => {
+            let data = scan_data_timing(file_path)
+                .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
             let header_dict = pyo3::types::PyDict::new(py);
 
             // Header identification
@@ -425,6 +431,16 @@ pub fn read_header(py: Python, file_path: &str) -> PyResult<Py<PyAny>> {
                 header
                     .last_change_time
                     .map(|t| format_recording_time(t, None)),
+            )?;
+            header_dict.set_item(
+                "start_from_data_raw",
+                data.first_sample_us
+                    .and_then(|time| timestamp_us_to_string(time, None)),
+            )?;
+            header_dict.set_item(
+                "end_from_data_raw",
+                data.last_sample_us
+                    .and_then(|time| timestamp_us_to_string(time, None)),
             )?;
 
             // Device configuration
