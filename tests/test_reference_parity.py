@@ -91,14 +91,14 @@ def _rust_rows(
     )
 
     rows: list[tuple[int, float, float, float]] = []
-    for i in range(len(data["timestamp"])):
-        ms = int(data["timestamp"][i] // 1000)
+    for i in range(len(data)):
+        ms = data.index[i].value // 1_000_000
         rows.append(
             (
                 ms,
-                float(data["acc_x"][i]),
-                float(data["acc_y"][i]),
-                float(data["acc_z"][i]),
+                float(data["acc_x"].iloc[i]),
+                float(data["acc_y"].iloc[i]),
+                float(data["acc_z"].iloc[i]),
             )
         )
     return rows
@@ -165,5 +165,5 @@ def test_temperature_and_battery_match_c_export_formulas() -> None:
     assert len(data["temperature"]) == sample_count
     assert len(data["battery"]) == sample_count
     for i in range(sample_count):
-        assert abs(float(data["temperature"][i]) - expected_temp_c) <= 1e-6
-        assert abs(float(data["battery"][i]) - expected_batt_v) <= 1e-6
+        assert abs(float(data["temperature"].iloc[i]) - expected_temp_c) <= 1e-6
+        assert abs(float(data["battery"].iloc[i]) - expected_batt_v) <= 1e-6

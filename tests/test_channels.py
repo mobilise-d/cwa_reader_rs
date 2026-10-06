@@ -28,9 +28,9 @@ def _recording(tmp_path: Path, axes: int, packing: int = 2) -> Path:
 def test_accelerometer_recording_omits_absent_channels(tmp_path: Path) -> None:
     data = read_cwa_file(str(_recording(tmp_path, 3)))
     assert set(data) == {
-        "timestamp", "acc_x", "acc_y", "acc_z", "temperature", "light", "battery",
+        "acc_x", "acc_y", "acc_z", "temperature", "light", "battery",
     }
-    assert len(data["timestamp"]) == 20
+    assert len(data) == 20
 
 
 @pytest.mark.parametrize("axes,packing", [(3, 0), (3, 2), (6, 2), (9, 2)])
@@ -54,15 +54,15 @@ def test_reader_returns_only_recorded_channels_and_preserves_zero_measurements(
         include_light=False,
         include_battery=False,
     )
-    expected = {"timestamp", "acc_x", "acc_y", "acc_z"}
+    expected = {"acc_x", "acc_y", "acc_z"}
     if axes >= 6:
         expected.update({"gyro_x", "gyro_y", "gyro_z"})
     if axes == 9 and include_magnetometer:
         expected.update({"mag_x", "mag_y", "mag_z"})
     assert set(data) == expected
-    count = len(data["timestamp"])
+    count = len(data)
     assert count > 0
-    for key in expected - {"timestamp"}:
+    for key in expected:
         assert data[key].dtype == np.float32
         np.testing.assert_array_equal(data[key], np.zeros(count, dtype=np.float32))
 
@@ -97,15 +97,15 @@ def test_channel_presence_follows_selected_samples_when_packet_layout_changes(
             key = f"{sensor}_{axis}"
             assert (key in data) == has_gyro
             if has_gyro:
-                assert len(data[key]) == len(data["timestamp"])
+                assert len(data[key]) == len(data)
                 if cut is not None:
                     np.testing.assert_array_equal(
                         data[key], np.zeros(len(data[key]), dtype=np.float32)
                     )
                 else:
-                    assert np.isnan(data[key][:20]).all()
+                    assert np.isnan(data[key].iloc[:20]).all()
                     np.testing.assert_array_equal(
-                        data[key][20:], np.zeros(len(data[key]) - 20, dtype=np.float32)
+                        data[key].iloc[20:], np.zeros(len(data[key]) - 20, dtype=np.float32)
                     )
 
 
@@ -127,5 +127,5 @@ def test_resampling_retains_channels_in_short_segments_missed_by_output_grid(
     for sensor_name in ["gyro", "mag"]:
         for axis in "xyz":
             values = data[f"{sensor_name}_{axis}"]
-            assert len(values) == len(data["timestamp"])
+            assert len(values) == len(data)
             assert np.isnan(values).all()

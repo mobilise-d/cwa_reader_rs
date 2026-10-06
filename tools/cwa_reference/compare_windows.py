@@ -5,7 +5,6 @@ import os
 import subprocess
 from pathlib import Path
 
-import numpy as np
 import pandas as pd
 
 from cwa_reader_rs import blocks, read_cwa_file
@@ -24,15 +23,15 @@ def parse_windows(text: str) -> list[tuple[int, int]]:
     return out
 
 
-def to_df_rust(data: dict) -> pd.DataFrame:
-    df = pd.DataFrame(data)[["timestamp", "acc_x", "acc_y", "acc_z"]]
-    df["ts"] = pd.to_datetime(df["timestamp"], unit="us", utc=True)
-    return df[["ts", "acc_x", "acc_y", "acc_z"]]
+def to_df_rust(data: pd.DataFrame) -> pd.DataFrame:
+    return data[["acc_x", "acc_y", "acc_z"]].reset_index().rename(
+        columns={"timestamp": "ts"}
+    )
 
 
 def to_df_c(path: Path) -> pd.DataFrame:
     df = pd.read_csv(path, header=None, names=["ts", "acc_x", "acc_y", "acc_z"])
-    df["ts"] = pd.to_datetime(df["ts"], utc=True)
+    df["ts"] = pd.to_datetime(df["ts"])
     return df[["ts", "acc_x", "acc_y", "acc_z"]]
 
 
@@ -134,11 +133,7 @@ def main() -> int:
     cursor = 0
     for b in range(total_blocks):
         try:
-            n = len(
-                read_cwa_file(str(cwa_file), cut=blocks(b, b + 1), **opts)[
-                    "timestamp"
-                ]
-            )
+            n = len(read_cwa_file(str(cwa_file), cut=blocks(b, b + 1), **opts))
         except Exception:
             n = 0
         block_ranges.append((cursor, cursor + n))

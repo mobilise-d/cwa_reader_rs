@@ -9,7 +9,7 @@ use std::fs::File;
 use std::io::{BufWriter, Read, Seek, SeekFrom};
 
 use numpy::IntoPyArray;
-use pyo3::types::PyDict;
+use pyo3::types::{PyDelta, PyDeltaAccess, PyDict, PyTzInfo};
 
 const MAX_RESAMPLE_HZ: f64 = 10_000.0;
 
@@ -1511,12 +1511,9 @@ fn find_previous_packet_end(file: &mut File, start_block: usize) -> Result<Optio
     Ok(None)
 }
 
-/// Convert CwaDataResult to Python dictionary with NumPy arrays (zero-copy)
-fn create_python_dict_numpy(py: Python, data: CwaDataResult) -> PyResult<Py<PyAny>> {
+/// Transfer sample columns to pandas with the device clock as a datetime index.
+fn create_python_dataframe(py: Python, data: CwaDataResult, utc: bool) -> PyResult<Py<PyAny>> {
     let dict = PyDict::new(py);
-
-    // Convert timestamps to NumPy array (zero-copy transfer)
-    dict.set_item("timestamp", data.timestamps.into_pyarray(py))?;
 
     // Convert sensor data to NumPy arrays (zero-copy transfer)
     dict.set_item("acc_x", data.acc_x.into_pyarray(py))?;
@@ -1554,7 +1551,29 @@ fn create_python_dict_numpy(py: Python, data: CwaDataResult) -> PyResult<Py<PyAn
         dict.set_item("battery", battery_levels.into_pyarray(py))?;
     }
 
-    Ok(dict.into())
+    let pandas = py.import("pandas")?;
+    let datetime_kwargs = PyDict::new(py);
+    datetime_kwargs.set_item("name", "timestamp")?;
+    datetime_kwargs.set_item("copy", false)?;
+    datetime_kwargs.set_item(
+        "dtype",
+        if utc {
+            "datetime64[us, UTC]"
+        } else {
+            "datetime64[us]"
+        },
+    )?;
+    let timestamps = data.timestamps.into_pyarray(py);
+    let index = pandas
+        .getattr("DatetimeIndex")?
+        .call((timestamps,), Some(&datetime_kwargs))?;
+    let dataframe_kwargs = PyDict::new(py);
+    dataframe_kwargs.set_item("index", index)?;
+    dataframe_kwargs.set_item("copy", false)?;
+    Ok(pandas
+        .getattr("DataFrame")?
+        .call((dict,), Some(&dataframe_kwargs))?
+        .unbind())
 }
 
 fn csv_header(options: &CwaParsingOptions, channels: SensorChannels) -> Vec<&'static str> {
@@ -1671,6 +1690,7 @@ fn write_data_result_csv(
     output_path: &str,
     data: &CwaDataResult,
     options: &CwaParsingOptions,
+    offset_us: i64,
 ) -> Result<(), CwaError> {
     let output_file = File::create(output_path)?;
     let output_buffer = BufWriter::with_capacity(16 * 1024 * 1024, output_file);
@@ -1696,7 +1716,7 @@ fn write_data_result_csv(
             options,
             channels,
             CsvRowValues {
-                timestamp: data.timestamps[i],
+                timestamp: data.timestamps[i] - offset_us,
                 acc_x: data.acc_x[i],
                 acc_y: data.acc_y[i],
                 acc_z: data.acc_z[i],
@@ -1758,9 +1778,29 @@ pub fn blocks(py: Python, start: Option<usize>, end: Option<usize>) -> PyResult<
     Ok(dict.into())
 }
 
+fn fixed_timezone_offset_us(timezone: Option<&Bound<'_, PyTzInfo>>) -> PyResult<Option<i64>> {
+    let Some(timezone) = timezone else {
+        return Ok(None);
+    };
+    let offset = timezone
+        .call_method1("utcoffset", (timezone.py().None(),))?
+        .cast_into::<PyDelta>()?;
+    Ok(Some(
+        (i64::from(offset.get_days()) * 86400 + i64::from(offset.get_seconds())) * 1_000_000
+            + i64::from(offset.get_microseconds()),
+    ))
+}
+
 /// Python interface for reading CWA data.
 ///
-/// Gyro and magnetometer keys are included only when present in the selected
+/// Returns a pandas DataFrame with a DatetimeIndex named `timestamp`.
+/// `fixed_utc_offset_timezone` accepts a Python `datetime.timezone` object.
+/// Its fixed offset is subtracted throughout and the index is UTC-aware.
+/// Otherwise the index is naive. Determine any named timezone's offset in Python
+/// at clock synchronization, rather than at recording start.
+/// Numeric channel columns retain their float32 dtype.
+///
+/// Gyro and magnetometer columns are included only when present in the selected
 /// samples. Recorded zero measurements remain present; missing samples in a
 /// present channel are NaN.
 ///
@@ -1776,7 +1816,9 @@ pub fn blocks(py: Python, start: Option<usize>, end: Option<usize>) -> PyResult<
     include_light=true,
     include_battery=true,
     resample_hz=None,
-    resample_method="cubic"
+    resample_method="cubic",
+    *,
+    fixed_utc_offset_timezone=None
 ))]
 #[allow(clippy::too_many_arguments)]
 pub fn read_cwa_file(
@@ -1789,6 +1831,7 @@ pub fn read_cwa_file(
     include_battery: bool,
     resample_hz: Option<f64>,
     resample_method: &str,
+    fixed_utc_offset_timezone: Option<&Bound<'_, PyTzInfo>>,
 ) -> PyResult<Py<PyAny>> {
     let options = CwaParsingOptions {
         include_magnetometer,
@@ -1801,6 +1844,7 @@ pub fn read_cwa_file(
     let resample_options = parse_resample_options(resample_hz, resample_method)?;
     let plan = resolve_read_plan(file_path, cut)
         .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
+    let offset_us = fixed_timezone_offset_us(fixed_utc_offset_timezone)?;
 
     match if let Some(resample) = resample_options {
         read_cwa_data_resampled_streaming(
@@ -1815,7 +1859,14 @@ pub fn read_cwa_file(
         read_cwa_data(file_path, plan.start_block, plan.num_blocks, Some(options))
             .and_then(|data| filter_data_by_time_range(data, plan.time_range))
     } {
-        Ok(data) => create_python_dict_numpy(py, data),
+        Ok(mut data) => {
+            if let Some(offset_us) = offset_us {
+                for timestamp in &mut data.timestamps {
+                    *timestamp -= offset_us;
+                }
+            }
+            create_python_dataframe(py, data, offset_us.is_some())
+        }
         Err(e) => Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
             e.to_string(),
         )),
@@ -1826,6 +1877,9 @@ pub fn read_cwa_file(
 /// Write CWA samples directly to CSV.
 ///
 /// Supports the same optional resampling and time-range controls as `read_cwa_file`.
+/// `fixed_utc_offset_timezone` accepts a Python `datetime.timezone` object;
+/// with it, numeric `time` values are UTC Unix seconds.
+/// Otherwise they encode the device clock without assigning a timezone.
 #[pyo3(signature = (
     file_path,
     output_path,
@@ -1835,7 +1889,9 @@ pub fn read_cwa_file(
     include_light=false,
     include_battery=false,
     resample_hz=None,
-    resample_method="cubic"
+    resample_method="cubic",
+    *,
+    fixed_utc_offset_timezone=None
 ))]
 #[allow(clippy::too_many_arguments)]
 pub fn write_cwa_csv(
@@ -1848,6 +1904,7 @@ pub fn write_cwa_csv(
     include_battery: bool,
     resample_hz: Option<f64>,
     resample_method: &str,
+    fixed_utc_offset_timezone: Option<&Bound<'_, PyTzInfo>>,
 ) -> PyResult<()> {
     let options = CwaParsingOptions {
         include_magnetometer,
@@ -1860,6 +1917,7 @@ pub fn write_cwa_csv(
     let resample_options = parse_resample_options(resample_hz, resample_method)?;
     let plan = resolve_read_plan(file_path, cut)
         .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
+    let offset_us = fixed_timezone_offset_us(fixed_utc_offset_timezone)?.unwrap_or(0);
 
     write_cwa_csv_data(
         file_path,
@@ -1869,6 +1927,7 @@ pub fn write_cwa_csv(
         options,
         resample_options,
         plan.time_range,
+        offset_us,
     )
     .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))
 }
@@ -1892,6 +1951,7 @@ fn scan_sensor_channels(
     Ok(channels)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn write_cwa_csv_data(
     file_path: &str,
     output_path: &str,
@@ -1900,6 +1960,7 @@ fn write_cwa_csv_data(
     options: CwaParsingOptions,
     resample_options: Option<ResampleOptions>,
     time_range: TimeRangeOptions,
+    offset_us: i64,
 ) -> Result<(), CwaError> {
     time_range.validate()?;
 
@@ -1912,13 +1973,13 @@ fn write_cwa_csv_data(
             resample,
             time_range,
         )?;
-        return write_data_result_csv(output_path, &data, &options);
+        return write_data_result_csv(output_path, &data, &options, offset_us);
     }
 
     if time_range.has_bounds() {
         let data = read_cwa_data(file_path, start_block, num_blocks, Some(options.clone()))?;
         let data = filter_data_by_time_range(data, time_range)?;
-        return write_data_result_csv(output_path, &data, &options);
+        return write_data_result_csv(output_path, &data, &options, offset_us);
     }
 
     let (mut file, start_block, end_block, initial_previous_packet_end) =
@@ -1970,7 +2031,7 @@ fn write_cwa_csv_data(
                 &options,
                 channels,
                 CsvRowValues {
-                    timestamp: timestamps[i],
+                    timestamp: timestamps[i] - offset_us,
                     acc_x: sample.acc_x,
                     acc_y: sample.acc_y,
                     acc_z: sample.acc_z,
