@@ -1,7 +1,6 @@
 use crate::errors;
 use crate::packet::{cwa_timestamp, packet_meta, read_sector};
-use chrono::{DateTime, FixedOffset, LocalResult, Offset, TimeZone, Utc};
-use chrono_tz::Tz;
+use chrono::{DateTime, FixedOffset, TimeZone, Utc};
 use pyo3::prelude::*;
 use serde::Serialize;
 use std::fs::File;
@@ -184,48 +183,46 @@ fn read_cwa_header(file_path: &str) -> Result<CwaHeader, errors::CwaError> {
     })
 }
 
-/// Resolve the full recording's start once, independently of any selected cut.
-pub(crate) fn recording_offset(
-    file_path: &str,
-    recording_timezone: Option<&str>,
-) -> PyResult<Option<FixedOffset>> {
-    let Some(name) = recording_timezone else {
+/// Parse the fixed device-clock offset, without inferring a timezone from the file.
+pub(crate) fn parse_utc_offset(utc_offset: Option<&str>) -> PyResult<Option<FixedOffset>> {
+    let Some(value) = utc_offset else {
         return Ok(None);
     };
-    let timezone: Tz = name.parse().map_err(|_| {
-        pyo3::exceptions::PyValueError::new_err(format!("Unknown recording_timezone: {name}"))
-    })?;
-    let start = recording_start(file_path)
-        .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
-    let start = start.naive_utc();
-    match timezone.from_local_datetime(&start) {
-        LocalResult::Single(time) => Ok(Some(time.offset().fix())),
-        LocalResult::Ambiguous(_, _) => Err(pyo3::exceptions::PyValueError::new_err(format!(
-            "Recording start {start} is ambiguous in {name}"
-        ))),
-        LocalResult::None => Err(pyo3::exceptions::PyValueError::new_err(format!(
-            "Recording start {start} does not exist in {name}"
-        ))),
+    let invalid = || {
+        pyo3::exceptions::PyValueError::new_err(format!(
+            "Invalid utc_offset: {value}. Expected UTC, UTC+H, UTC-H, or UTC±HH:MM"
+        ))
+    };
+    let suffix = value.strip_prefix("UTC").ok_or_else(invalid)?;
+    if suffix.is_empty() {
+        return Ok(Some(FixedOffset::east_opt(0).unwrap()));
     }
-}
-
-fn recording_start(file_path: &str) -> Result<DateTime<Utc>, errors::CwaError> {
-    let mut file = File::open(file_path)?;
-    let mut header = [0u8; 1024];
-    file.read_exact(&mut header)?;
-    if &header[..2] != b"MD" {
-        return Err("First block is not a metadata block".into());
+    let (sign, time) = if let Some(time) = suffix.strip_prefix('+') {
+        (1, time)
+    } else if let Some(time) = suffix.strip_prefix('-') {
+        (-1, time)
+    } else {
+        return Err(invalid());
+    };
+    let (hours, minutes) = time.split_once(':').unwrap_or((time, "00"));
+    if hours.is_empty()
+        || hours.len() > 2
+        || minutes.len() != 2
+        || !hours
+            .bytes()
+            .chain(minutes.bytes())
+            .all(|c| c.is_ascii_digit())
+    {
+        return Err(invalid());
     }
-    while let Some(buffer) = read_sector(&mut file)? {
-        if let Some(meta) = packet_meta(&buffer)? {
-            let (start, _) = meta.natural_bounds();
-            return DateTime::from_timestamp_micros((start * 1_000_000.0) as i64)
-                .ok_or_else(|| "Invalid recording start".into());
-        }
+    let hours: i32 = hours.parse().map_err(|_| invalid())?;
+    let minutes: i32 = minutes.parse().map_err(|_| invalid())?;
+    if minutes >= 60 {
+        return Err(invalid());
     }
-    // A header-only recording can still have a configured start.
-    cwa_timestamp(u32::from_le_bytes(header[13..17].try_into().unwrap()))
-        .ok_or_else(|| "Cannot determine recording start for recording_timezone".into())
+    FixedOffset::east_opt(sign * (hours * 3600 + minutes * 60))
+        .map(Some)
+        .ok_or_else(invalid)
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -320,17 +317,17 @@ fn scan_data_timing(file_path: &str) -> Result<DataTimingSummary, errors::CwaErr
 ///   `(sample_count - 1) / duration_s_from_data`, or `None` when fewer than two
 ///   samples or no positive data duration are available.
 ///
-/// Timestamp strings are naive unless `recording_timezone` is supplied. With
-/// a timezone, the full recording's start offset is applied throughout and
-/// timestamp strings are UTC. Durations and sampling rates are unchanged.
+/// Timestamp strings are naive unless `utc_offset` is supplied. The fixed offset
+/// is applied throughout and timestamp strings are UTC. Durations and sampling
+/// rates are unchanged.
 #[pyfunction]
-#[pyo3(signature = (file_path, *, recording_timezone=None))]
+#[pyo3(signature = (file_path, *, utc_offset=None))]
 pub fn sampling_consistency_report(
     py: Python,
     file_path: &str,
-    recording_timezone: Option<&str>,
+    utc_offset: Option<&str>,
 ) -> PyResult<Py<PyAny>> {
-    let offset = recording_offset(file_path, recording_timezone)?;
+    let offset = parse_utc_offset(utc_offset)?;
     let header = read_cwa_header(file_path)
         .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
     let data = scan_data_timing(file_path)
@@ -390,14 +387,13 @@ pub fn sampling_consistency_report(
     Ok(report.into())
 }
 
+/// Read CWA metadata, including `last_change_time`, the last metadata-write time.
+/// Timestamp strings preserve the device clock by default. Supply `utc_offset`
+/// to convert them to UTC using that fixed offset.
 #[pyfunction]
-#[pyo3(signature = (file_path, *, recording_timezone=None))]
-pub fn read_header(
-    py: Python,
-    file_path: &str,
-    recording_timezone: Option<&str>,
-) -> PyResult<Py<PyAny>> {
-    let offset = recording_offset(file_path, recording_timezone)?;
+#[pyo3(signature = (file_path, *, utc_offset=None))]
+pub fn read_header(py: Python, file_path: &str, utc_offset: Option<&str>) -> PyResult<Py<PyAny>> {
+    let offset = parse_utc_offset(utc_offset)?;
     match read_cwa_header(file_path) {
         Ok(header) => {
             let header_dict = pyo3::types::PyDict::new(py);

@@ -11,7 +11,7 @@ pub(crate) struct PacketMeta {
 
 pub(crate) fn cwa_timestamp(value: u32) -> Option<DateTime<Utc>> {
     // CWA stores a device clock without a timezone. UTC is only the arithmetic
-    // basis here; public outputs interpret it using recording_timezone.
+    // basis here; public outputs interpret it using utc_offset.
     if value == 0 || value == u32::MAX {
         return None;
     }

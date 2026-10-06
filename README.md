@@ -61,7 +61,7 @@ acc_z = data["acc_z"]
 ```
 
 The returned object is a pandas DataFrame with a `DatetimeIndex` named `timestamp`.
-Without `recording_timezone`, the index preserves the device clock without
+Without `utc_offset`, the index preserves the device clock without
 assigning a timezone. Sensor values are `float32` columns. Timestamps preserve
 the reader's microsecond precision.
 Accelerometer values are in g, gyroscope values are in degrees per second,
@@ -79,41 +79,68 @@ This is a breaking change before 1.0: use `data.index` for timestamps and
 columns before accessing them, for example `if "gyro_x" in data.columns:`.
 CSV exports follow the same rule and omit columns for absent channels.
 
-### Recording Timezone
+### Device clock and UTC offsets
+
+The AX device copies the configuring computer's local time when its clock is
+synchronized. It then continues on that clock without adjusting for daylight
+saving, even if a DST change occurs before recording starts. See the
+[AX3/AX6 time-zone FAQ](https://github.com/openmovementproject/openmovement/blob/master/Docs/ax3/ax3-faq.md#time-zone-and-dst).
+
+The reader accepts an explicit, fixed `utc_offset`, such as `"UTC+2"`,
+`"UTC-4"`, or `"UTC+05:45"`. A positive offset means the device clock is ahead of
+UTC: `"UTC+2"` converts device time `12:00` to `10:00` UTC. `"UTC"` and `"UTC+0"`
+represent a clock already set to UTC. The offset is applied to every timestamp,
+including partial reads and resampling, and the returned index is UTC-aware.
+The reader does not resolve named timezones or infer an offset from the file.
+
+For a device configured using local time, we recommend this workflow:
+
+1. Read `last_change_time` with `read_header`, without an offset. Assume that this
+   was also the last clock synchronization time only after checking your
+   configuration software. The field records the last metadata write, which
+   can differ from the last clock synchronization.
+2. Use the configuration timezone to calculate its UTC offset at that timestamp.
+3. Pass that fixed offset to `read_cwa_file`, for example `utc_offset="UTC+2"`.
+4. Convert the UTC index to your timezone with `data.tz_convert(tz)`.
 
 ```python
-from cwa_reader_rs import read_cwa_file
+import pandas as pd
+from cwa_reader_rs import read_cwa_file, read_header
 
-tz = "Europe/Berlin"
-data = read_cwa_file("recording.cwa", recording_timezone=tz)
+path = "recording.cwa"
+tz = "Europe/Berlin"  # Timezone of the computer that synchronized the clock.
+metadata = read_header(path)
+configured_at = metadata["last_change_time"]
+if configured_at is None:
+    raise ValueError("Configuration time is missing; supply the device-clock UTC offset")
+
+# Assumes the last metadata write also synchronized the device clock.
+configured = pd.Timestamp(configured_at).tz_localize(tz)
+offset = configured.strftime("%z")  # e.g. "+0200"
+utc_offset = f"UTC{offset[:3]}:{offset[3:]}"  # e.g. "UTC+02:00"
+
+data = read_cwa_file(path, utc_offset=utc_offset)
 assert str(data.index.tz) == "UTC"
 localised = data.tz_convert(tz)
 ```
 
-`recording_timezone` is an IANA timezone name. The reader assumes that the device
-clock uses the UTC offset that this timezone had at the full recording's first
-sample. It resolves that offset once and applies it to every timestamp, returning
-a UTC-aware index. Partial reads and resampling use the same full-recording offset.
-Converting the returned DataFrame to a local timezone then applies that timezone's
-daylight-saving rules, including skipped or repeated local hours.
+Using the offset at configuration time avoids a one-hour error when configuration
+and recording start fall on opposite sides of a DST change. Converting the UTC
+index to a local timezone applies that timezone's DST rules, including skipped
+or repeated local hours. For a DataFrame index, use `tz_convert`; `.dt.tz_convert`
+is for a datetime Series.
 
-The AX device does not adjust its own clock for daylight saving. It normally
-copies the configuring computer's local time, so this assumption requires that
-the configuration offset still applies at recording start. If a clock change
-occurred between configuration and recording start, the start-based assumption
-does not recover the correct UTC times. See the
-[AX3/AX6 time-zone FAQ](https://github.com/openmovementproject/openmovement/blob/master/Docs/ax3/ax3-faq.md#time-zone-and-dst).
+If `last_change_time` does not represent clock synchronization, supply the offset
+that actually applied when the clock was synchronized. If that local timestamp
+falls in a repeated hour, resolve the ambiguity explicitly in pandas using your
+configuration information. The example raises for ambiguous or nonexistent local
+times rather than guessing.
 
-An ambiguous or nonexistent recording start in the supplied timezone raises
-`ValueError`. If there are no samples, the configured header start is used;
-without either start, timezone interpretation raises `RuntimeError`.
-With `recording_timezone=None`, no timezone is inferred from the computer or
-file metadata, and the index remains timezone-naive.
-
+With `utc_offset=None`, no timezone is assigned and the index remains naive.
 `read_header`, `sampling_consistency_report`, and `write_cwa_csv` accept the same
 keyword. Header and report timestamps are naive ISO 8601 strings by default and
-UTC RFC 3339 strings when a timezone is supplied. CSV `time` values remain numeric
-seconds: they encode the device clock by default and UTC Unix time with a timezone.
+UTC RFC 3339 strings when an offset is supplied. CSV `time` values remain numeric
+seconds: they encode the device clock by default and UTC Unix time with an offset.
 Durations, elapsed-second cuts, and sampling rates do not change.
 
 The datetime index uses `datetime64[us]`, or `datetime64[us, UTC]`, with 8 bytes
@@ -131,12 +158,15 @@ header = read_header("recording.cwa")
 device_id = header["device_id"]
 sample_rate_hz = header["sample_rate_hz"]
 logging_start_time = header["logging_start_time"]
+last_change_time = header["last_change_time"]
 ```
 
-The header read returns metadata from the 1024-byte CWA metadata block without decoding sample values. With `recording_timezone`, it also inspects packet metadata to find the first sample's device time. It includes device and session identifiers (`hardware_type`, `device_id`, `session_id`), recording timing fields (`logging_start_time`, `logging_end_time`, `last_change_time`), nominal sensor configuration (`sample_rate_hz`, `accel_range`, `gyro_range`, `magnetometer_enabled`, `firmware_revision`), and the free-form `annotation`.
+The header read returns metadata from the 1024-byte CWA metadata block without decoding sample values. It includes device and session identifiers (`hardware_type`, `device_id`, `session_id`), recording timing fields (`logging_start_time`, `logging_end_time`, `last_change_time`), nominal sensor configuration (`sample_rate_hz`, `accel_range`, `gyro_range`, `magnetometer_enabled`, `firmware_revision`), and the free-form `annotation`.
 
 Time fields are returned as ISO 8601 strings when present, or `None` when unset.
-They are timezone-naive by default and UTC when `recording_timezone` is supplied.
+They are timezone-naive by default and UTC when `utc_offset` is supplied.
+`last_change_time` is the last metadata-write time, not a dedicated clock-sync log.
+Read it without an offset when deriving the configuration offset as shown above.
 
 ### Sampling Consistency Report
 
