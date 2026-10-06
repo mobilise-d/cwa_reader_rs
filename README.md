@@ -95,7 +95,7 @@ The reader does not resolve named timezones or infer an offset from the file.
 
 For a device configured using local time, we recommend this workflow:
 
-1. Read `last_change_time` with `read_header`, without an offset. Assume that this
+1. Read `last_change_time_raw` with `read_header`. Assume that this
    was also the last clock synchronization time only after checking your
    configuration software. The field records the last metadata write, which
    can differ from the last clock synchronization.
@@ -110,7 +110,7 @@ from cwa_reader_rs import read_cwa_file, read_header
 path = "recording.cwa"
 tz = "Europe/Berlin"  # Timezone of the computer that synchronized the clock.
 metadata = read_header(path)
-configured_at = metadata["last_change_time"]
+configured_at = metadata["last_change_time_raw"]
 if configured_at is None:
     raise ValueError("Configuration time is missing; supply the device-clock UTC offset")
 
@@ -130,16 +130,17 @@ index to a local timezone applies that timezone's DST rules, including skipped
 or repeated local hours. For a DataFrame index, use `tz_convert`; `.dt.tz_convert`
 is for a datetime Series.
 
-If `last_change_time` does not represent clock synchronization, supply the offset
+If `last_change_time_raw` does not represent clock synchronization, supply the offset
 that actually applied when the clock was synchronized. If that local timestamp
 falls in a repeated hour, resolve the ambiguity explicitly in pandas using your
 configuration information. The example raises for ambiguous or nonexistent local
 times rather than guessing.
 
 With `utc_offset=None`, no timezone is assigned and the index remains naive.
-`read_header`, `sampling_consistency_report`, and `write_cwa_csv` accept the same
-keyword. Header and report timestamps are naive ISO 8601 strings by default and
-UTC RFC 3339 strings when an offset is supplied. CSV `time` values remain numeric
+`sampling_consistency_report` and `write_cwa_csv` accept the same keyword.
+Report timestamps are naive ISO 8601 strings by default and UTC RFC 3339 strings
+when an offset is supplied. `read_header` always returns raw device-clock times
+and accepts no offset. CSV `time` values remain numeric
 seconds: they encode the device clock by default and UTC Unix time with an offset.
 Durations, elapsed-second cuts, and sampling rates do not change.
 
@@ -157,16 +158,19 @@ header = read_header("recording.cwa")
 
 device_id = header["device_id"]
 sample_rate_hz = header["sample_rate_hz"]
-logging_start_time = header["logging_start_time"]
-last_change_time = header["last_change_time"]
+logging_start_time_raw = header["logging_start_time_raw"]
+last_change_time_raw = header["last_change_time_raw"]
 ```
 
-The header read returns metadata from the 1024-byte CWA metadata block without decoding sample values. It includes device and session identifiers (`hardware_type`, `device_id`, `session_id`), recording timing fields (`logging_start_time`, `logging_end_time`, `last_change_time`), nominal sensor configuration (`sample_rate_hz`, `accel_range`, `gyro_range`, `magnetometer_enabled`, `firmware_revision`), and the free-form `annotation`.
+The header read returns metadata from the 1024-byte CWA metadata block without decoding sample values. It includes device and session identifiers (`hardware_type`, `device_id`, `session_id`), recording timing fields (`logging_start_time_raw`, `logging_end_time_raw`, `last_change_time_raw`), nominal sensor configuration (`sample_rate_hz`, `accel_range`, `gyro_range`, `magnetometer_enabled`, `firmware_revision`), and the free-form `annotation`.
 
-Time fields are returned as ISO 8601 strings when present, or `None` when unset.
-They are timezone-naive by default and UTC when `utc_offset` is supplied.
-`last_change_time` is the last metadata-write time, not a dedicated clock-sync log.
-Read it without an offset when deriving the configuration offset as shown above.
+The `_raw` time fields are timezone-naive ISO 8601 strings when present, or `None`
+when unset. They decode the unaltered time values recorded by the sensor, without
+applying any UTC offset or timezone conversion. These values need conversion to
+UTC or local time for most analysis steps. `read_header` accepts no offset.
+`last_change_time_raw` records the last metadata write and may differ from the last
+clock synchronization. Check your configuration software before using it to
+derive the UTC offset as shown above.
 
 ### Sampling Consistency Report
 
@@ -188,7 +192,8 @@ samplingrate_hz_from_data = report["samplingrate_hz_from_data"]
 This helper compares the timing implied by the CWA metadata header with the timing implied by the data packets. It scans packet metadata only; it does not decode or return sample values.
 
 Header start/end and data start/end are returned as ISO 8601 strings or `None`,
-with the same timezone interpretation as `read_header`. Header duration is `end_from_header - start_from_header`. Data duration is the inclusive first-sample-to-last-sample span, using the same packet timestamp, `timestampOffset`, and continuity correction as `read_cwa_file`. The header sampling rate is decoded from the metadata rate code. The data sampling rate is `(sample_count - 1) / duration_s_from_data`.
+and remain timezone-naive unless `utc_offset` is supplied, in which case they are
+converted to UTC. Header duration is `end_from_header - start_from_header`. Data duration is the inclusive first-sample-to-last-sample span, using the same packet timestamp, `timestampOffset`, and continuity correction as `read_cwa_file`. The header sampling rate is decoded from the metadata rate code. The data sampling rate is `(sample_count - 1) / duration_s_from_data`.
 
 The values provided in the header are configured values, not measured values. In timed recordings, data-derived start and end timestamps may differ from the configured header start and end by a few seconds, for example because logging starts after the device wakes and stops when the device reaches its configured stop condition.
 

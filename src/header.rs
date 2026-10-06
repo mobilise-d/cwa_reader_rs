@@ -387,13 +387,14 @@ pub fn sampling_consistency_report(
     Ok(report.into())
 }
 
-/// Read CWA metadata, including `last_change_time`, the last metadata-write time.
-/// Timestamp strings preserve the device clock by default. Supply `utc_offset`
-/// to convert them to UTC using that fixed offset.
+/// Read CWA metadata without applying timezone or UTC-offset conversion.
+/// `logging_start_time_raw`, `logging_end_time_raw`, and `last_change_time_raw`
+/// are naive ISO 8601 strings preserving the unaltered sensor clock values,
+/// or None when unset. Convert them to UTC or local time for most analysis.
+/// `last_change_time_raw` records the last metadata write, which need not be
+/// the last clock synchronization; check your configuration software.
 #[pyfunction]
-#[pyo3(signature = (file_path, *, utc_offset=None))]
-pub fn read_header(py: Python, file_path: &str, utc_offset: Option<&str>) -> PyResult<Py<PyAny>> {
-    let offset = parse_utc_offset(utc_offset)?;
+pub fn read_header(py: Python, file_path: &str) -> PyResult<Py<PyAny>> {
     match read_cwa_header(file_path) {
         Ok(header) => {
             let header_dict = pyo3::types::PyDict::new(py);
@@ -408,22 +409,22 @@ pub fn read_header(py: Python, file_path: &str, utc_offset: Option<&str>) -> PyR
 
             // Timing configuration
             header_dict.set_item(
-                "logging_start_time",
+                "logging_start_time_raw",
                 header
                     .logging_start_time
-                    .map(|t| format_recording_time(t, offset)),
+                    .map(|t| format_recording_time(t, None)),
             )?;
             header_dict.set_item(
-                "logging_end_time",
+                "logging_end_time_raw",
                 header
                     .logging_end_time
-                    .map(|t| format_recording_time(t, offset)),
+                    .map(|t| format_recording_time(t, None)),
             )?;
             header_dict.set_item(
-                "last_change_time",
+                "last_change_time_raw",
                 header
                     .last_change_time
-                    .map(|t| format_recording_time(t, offset)),
+                    .map(|t| format_recording_time(t, None)),
             )?;
 
             // Device configuration
