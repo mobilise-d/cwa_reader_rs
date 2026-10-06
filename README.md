@@ -61,8 +61,9 @@ acc_z = data["acc_z"]
 ```
 
 The returned object is a pandas DataFrame with a `DatetimeIndex` named `timestamp`.
-The index preserves the device clock without assigning a timezone. Sensor values
-are `float32` columns. Timestamps preserve the reader's microsecond precision.
+Without `recording_timezone`, the index preserves the device clock without
+assigning a timezone. Sensor values are `float32` columns. Timestamps preserve
+the reader's microsecond precision.
 Accelerometer values are in g, gyroscope values are in degrees per second,
 temperature is in degrees Celsius, and battery is in volts. When a recording
 does not contain a gyro or magnetometer channel in the selected samples, that
@@ -78,6 +79,48 @@ This is a breaking change before 1.0: use `data.index` for timestamps and
 columns before accessing them, for example `if "gyro_x" in data.columns:`.
 CSV exports follow the same rule and omit columns for absent channels.
 
+### Recording Timezone
+
+```python
+from cwa_reader_rs import read_cwa_file
+
+tz = "Europe/Berlin"
+data = read_cwa_file("recording.cwa", recording_timezone=tz)
+assert str(data.index.tz) == "UTC"
+localised = data.tz_convert(tz)
+```
+
+`recording_timezone` is an IANA timezone name. The reader assumes that the device
+clock uses the UTC offset that this timezone had at the full recording's first
+sample. It resolves that offset once and applies it to every timestamp, returning
+a UTC-aware index. Partial reads and resampling use the same full-recording offset.
+Converting the returned DataFrame to a local timezone then applies that timezone's
+daylight-saving rules, including skipped or repeated local hours.
+
+The AX device does not adjust its own clock for daylight saving. It normally
+copies the configuring computer's local time, so this assumption requires that
+the configuration offset still applies at recording start. If a clock change
+occurred between configuration and recording start, the start-based assumption
+does not recover the correct UTC times. See the
+[AX3/AX6 time-zone FAQ](https://github.com/openmovementproject/openmovement/blob/master/Docs/ax3/ax3-faq.md#time-zone-and-dst).
+
+An ambiguous or nonexistent recording start in the supplied timezone raises
+`ValueError`. If there are no samples, the configured header start is used;
+without either start, timezone interpretation raises `RuntimeError`.
+With `recording_timezone=None`, no timezone is inferred from the computer or
+file metadata, and the index remains timezone-naive.
+
+`read_header`, `sampling_consistency_report`, and `write_cwa_csv` accept the same
+keyword. Header and report timestamps are naive ISO 8601 strings by default and
+UTC RFC 3339 strings when a timezone is supplied. CSV `time` values remain numeric
+seconds: they encode the device clock by default and UTC Unix time with a timezone.
+Durations, elapsed-second cuts, and sampling rates do not change.
+
+The datetime index uses `datetime64[us]`, or `datetime64[us, UTC]`, with 8 bytes
+per timestamp. It wraps the transferred timestamp buffer without copying it;
+sensor columns also use the transferred NumPy buffers. Importing pandas adds
+process overhead, but the timestamp representation does not add per-sample memory.
+
 ### Header Read
 
 ```python
@@ -90,9 +133,10 @@ sample_rate_hz = header["sample_rate_hz"]
 logging_start_time = header["logging_start_time"]
 ```
 
-The header read returns metadata from the 1024-byte CWA metadata block without parsing sample data. It includes device and session identifiers (`hardware_type`, `device_id`, `session_id`), recording timing fields (`logging_start_time`, `logging_end_time`, `last_change_time`), nominal sensor configuration (`sample_rate_hz`, `accel_range`, `gyro_range`, `magnetometer_enabled`, `firmware_revision`), and the free-form `annotation`.
+The header read returns metadata from the 1024-byte CWA metadata block without decoding sample values. With `recording_timezone`, it also inspects packet metadata to find the first sample's device time. It includes device and session identifiers (`hardware_type`, `device_id`, `session_id`), recording timing fields (`logging_start_time`, `logging_end_time`, `last_change_time`), nominal sensor configuration (`sample_rate_hz`, `accel_range`, `gyro_range`, `magnetometer_enabled`, `firmware_revision`), and the free-form `annotation`.
 
-Time fields are returned as RFC 3339 strings when present, or `None` when the CWA header uses an unset start/end marker.
+Time fields are returned as ISO 8601 strings when present, or `None` when unset.
+They are timezone-naive by default and UTC when `recording_timezone` is supplied.
 
 ### Sampling Consistency Report
 
@@ -113,7 +157,8 @@ samplingrate_hz_from_data = report["samplingrate_hz_from_data"]
 
 This helper compares the timing implied by the CWA metadata header with the timing implied by the data packets. It scans packet metadata only; it does not decode or return sample values.
 
-Header start/end and data start/end are returned as RFC 3339 strings or `None`. Header duration is `end_from_header - start_from_header`. Data duration is the inclusive first-sample-to-last-sample span, using the same packet timestamp, `timestampOffset`, and continuity correction as `read_cwa_file`. The header sampling rate is decoded from the metadata rate code. The data sampling rate is `(sample_count - 1) / duration_s_from_data`.
+Header start/end and data start/end are returned as ISO 8601 strings or `None`,
+with the same timezone interpretation as `read_header`. Header duration is `end_from_header - start_from_header`. Data duration is the inclusive first-sample-to-last-sample span, using the same packet timestamp, `timestampOffset`, and continuity correction as `read_cwa_file`. The header sampling rate is decoded from the metadata rate code. The data sampling rate is `(sample_count - 1) / duration_s_from_data`.
 
 The values provided in the header are configured values, not measured values. In timed recordings, data-derived start and end timestamps may differ from the configured header start and end by a few seconds, for example because logging starts after the device wakes and stops when the device reaches its configured stop condition.
 

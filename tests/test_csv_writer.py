@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from pathlib import Path
-from datetime import datetime
 
 import pandas as pd
 import pytest
@@ -19,8 +18,8 @@ FIXTURE_DIR = Path(__file__).resolve().parent / "reference_data" / "openmovement
 CWA_FILE = FIXTURE_DIR / "example-610-steps.cwa"
 
 
-def _parse_rfc3339_us(value: str) -> int:
-    return int(datetime.fromisoformat(value).timestamp() * 1_000_000)
+def _parse_timestamp_us(value: str) -> int:
+    return pd.Timestamp(value).value // 1000
 
 
 def test_sampling_consistency_report_matches_reader_timestamps() -> None:
@@ -42,8 +41,8 @@ def test_sampling_consistency_report_matches_reader_timestamps() -> None:
     end_us = data.index[-1].value // 1000
     duration_s = (end_us - start_us) / 1_000_000.0
 
-    assert _parse_rfc3339_us(report["start_from_data"]) == start_us
-    assert _parse_rfc3339_us(report["end_from_data"]) == end_us
+    assert _parse_timestamp_us(report["start_from_data"]) == start_us
+    assert _parse_timestamp_us(report["end_from_data"]) == end_us
     assert report["duration_s_from_data"] == duration_s
     assert report["samplingrate_hz_from_data"] == pytest.approx(
         (len(data) - 1) / duration_s
