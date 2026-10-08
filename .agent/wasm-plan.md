@@ -1,6 +1,22 @@
 # Browser builds and parser separation
 
-Status: complete. Separate cwa-core, complete byte operations, and PR #8 integration validated and delivered.
+Status: main-branch merge resolved after PR #8 merged upstream; commit review and
+PR delivery remain. The previous browser delivery and reviewed history remain intact.
+
+COMPACTION CONTINUITY: Re-read implement-code-change and the task-defining artifacts before continuing after compaction or session restoration.
+
+## Main-branch merge
+
+Origin main 53830c8 now contains PR #8's original path-based metadata optimization.
+Merge it normally, preserve b50bb9a's Read+Seek adaptation in cwa-core, remove the
+obsolete src/header.rs conflict, and retain one README metadata description.
+Verification/commit gate: existing 13 Rust and 122 native Python tests, formatting,
+no unresolved conflicts or duplicate parser, and temporary boundary parity checks.
+Review and close the merge commit; parent owns push and PR status verification.
+Merge resolution leaves all Rust/Python source and manifests identical to 4dc074b.
+The existing 13 Rust and 122 native Python tests pass, formatting/diff checks pass,
+and temporary 201-case boundary parity plus sparse-input I/O checks pass again.
+No new buffering implementation is authorized by this housekeeping task.
 
 ## Final follow-up verification
 
