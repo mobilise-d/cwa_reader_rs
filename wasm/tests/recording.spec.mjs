@@ -104,6 +104,42 @@ test('File resampling keeps the global grid across packet batch and cut boundari
   expect(cases).toHaveLength(6);
 });
 
+test('a short interior resampled cut needs no unused next-packet context', async ({ page }) => {
+  await page.goto('/');
+  await expect(page.getByLabel('Select a CWA file')).toBeEnabled();
+  const results = await page.evaluate(async () => {
+    const reader = await import('/pkg/cwa_reader_browser.js');
+    const { readCwaFileBatches } = await import('/pkg/cwa_reader_file.js');
+    const expected = (await (await fetch('/test-data/expected.json')).json()).short_interior_cut;
+    const bytes = new Uint8Array(await (await fetch(`/test-data/${expected.file}`)).arrayBuffer());
+    const options = { ...expected.options, batchPackets: 1, overlapPackets: 0 };
+    const direct = reader.readCwaFile(bytes, options);
+    const file = new File([bytes], 'short.cwa');
+    const slices = [];
+    const slice = file.slice.bind(file);
+    file.slice = (start, end) => { slices.push([start, end]); return slice(start, end); };
+    const batches = [];
+    for await (const data of readCwaFileBatches(file, options)) batches.push(data);
+    const normalize = data => ({ timestamps_us: Array.from(data.timestamps_us, String),
+      columns: Object.fromEntries(Object.entries(data.columns).map(([name, values]) => [name, Array.from(values)])) });
+    return { expected: { timestamps_us: expected.timestamps_us.map(String), columns: expected.columns },
+      direct: normalize(direct), batches: batches.filter(data => data.timestamps_us.length > 0).map(normalize),
+      payloads: slices.filter(([start, end]) => start >= 1024 && end - start >= 512) };
+  });
+  expect(results.expected.timestamps_us).toHaveLength(6);
+  expect(results.direct.timestamps_us).toEqual(results.expected.timestamps_us);
+  expect(results.batches).toHaveLength(1);
+  expect(results.batches[0].timestamps_us).toEqual(results.expected.timestamps_us);
+  for (const result of [results.direct, results.batches[0]]) {
+    expect(Object.keys(result.columns)).toEqual(Object.keys(results.expected.columns));
+    for (const [name, values] of Object.entries(result.columns)) {
+      values.forEach((value, i) => expect(value).toBeCloseTo(results.expected.columns[name][i], 5));
+    }
+  }
+  expect(results.payloads[0]).toEqual([1024, 1536]);
+  expect(results.payloads.every(([start, end]) => end - start === 512)).toBe(true);
+});
+
 test('File iteration stops reads on cancellation and never refills insufficient overlap', async ({ page }) => {
   await page.goto('/');
   await expect(page.getByLabel('Select a CWA file')).toBeEnabled();

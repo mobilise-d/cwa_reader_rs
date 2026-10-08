@@ -4,6 +4,7 @@ import hashlib
 import importlib.util
 import json
 import shutil
+import struct
 import sys
 from pathlib import Path
 
@@ -61,6 +62,35 @@ for name, path, options in all_cases:
     if options.get("include_light") is True:
         case["csv_text"] = csv_path.read_text()
     manifest["cases"].append(case)
+
+# Reuse the channel fixture, then make four 50-sample packets with interior
+# nonlinear values. The selected cut fits entirely within its first packet.
+short_folder = checkout / "generated/short-interior"
+short_folder.mkdir(parents=True, exist_ok=True)
+short_source = _recording(short_folder, 3).read_bytes()
+short_bytes = bytearray(short_source[:1024])
+for packet_index in range(4):
+    packet = bytearray(short_source[1024:])
+    struct.pack_into("<I", packet, 14, (12 << 26) | (1 << 22) | (1 << 17) | packet_index)
+    packet[24] = 0x49
+    struct.pack_into("<hH", packet, 26, 0, 50)
+    for sample in range(50):
+        value = (packet_index * 50 + sample) * 64
+        if packet_index == 0 and 3 <= sample < 13:
+            value = sample ** 3 * 8
+        struct.pack_into("<h", packet, 30 + sample * 6, value)
+    struct.pack_into("<H", packet, 510, (-sum(struct.unpack("<255H", packet[:510]))) & 0xFFFF)
+    short_bytes.extend(packet)
+short_path = out / "short-interior.cwa"
+short_path.write_bytes(short_bytes)
+short_options = dict(cut=reader.seconds(.1, .2), resample_hz=60,
+                     include_temperature=False, include_light=False, include_battery=False)
+short_data = reader.read_cwa_file(str(short_path), **short_options)
+manifest["short_interior_cut"] = {
+    "file": short_path.name, "options": short_options,
+    "timestamps_us": short_data.index.as_unit("us").asi8.tolist(),
+    "columns": {name: values.tolist() for name, values in short_data.items()},
+}
 
 errors = []
 for label, content, options in [
