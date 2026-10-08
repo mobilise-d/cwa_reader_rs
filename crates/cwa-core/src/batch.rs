@@ -96,6 +96,7 @@ struct CsvState {
 
 pub struct CwaBatchSession {
     total_packets: usize,
+    first_valid_packet: Option<usize>,
     descriptor: BatchDescriptor,
     phase: Phase,
     history: VecDeque<(usize, f64)>,
@@ -139,6 +140,7 @@ impl CwaBatchSession {
         };
         Ok(Self {
             total_packets,
+            first_valid_packet: None,
             descriptor: BatchDescriptor {
                 loaded_packets,
                 owned_packets,
@@ -195,7 +197,8 @@ impl CwaBatchSession {
                 .min(self.total_packets);
         self.descriptor.previous_packet_end = None;
         self.history.clear();
-        self.phase = if self.descriptor.loaded_packets.start > 0 {
+        self.phase = if self.descriptor.loaded_packets.start > self.first_valid_packet.unwrap_or(0)
+        {
             Phase::Seed(self.descriptor.loaded_packets.start - 1)
         } else {
             Phase::Payload
@@ -289,6 +292,7 @@ impl CwaBatchSession {
                 {
                     self.descriptor.selected_packets = located.packets;
                     self.descriptor.recording_origin_seconds = Some(located.origin);
+                    self.first_valid_packet = Some(located.first_valid_packet);
                     self.seconds = None;
                     self.restart_payload();
                 }

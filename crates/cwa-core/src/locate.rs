@@ -14,13 +14,15 @@ struct Timing {
 pub(crate) struct LocatedRange {
     pub packets: Range<usize>,
     pub origin: f64,
+    pub first_valid_packet: usize,
 }
 enum Pending {
     Read(usize),
     Error(&'static str),
 }
 
-/// The cache contains only visited timing probes, never a file-wide index.
+/// The cache contains only visited timing probes and compact empty intervals,
+/// never a file-wide index. Known empty runs are crossed in one step.
 /// Re-evaluating the small search after each response keeps asynchronous source
 /// access outside the locator and avoids retaining a partially decoded packet.
 pub(crate) struct SecondsLocator {
@@ -28,7 +30,8 @@ pub(crate) struct SecondsLocator {
     start: Option<f64>,
     end: Option<f64>,
     next: usize,
-    probes: BTreeMap<usize, Option<Timing>>,
+    probes: BTreeMap<usize, Timing>,
+    empty_ranges: BTreeMap<usize, usize>,
 }
 impl SecondsLocator {
     pub fn new(total: usize, start: Option<f64>, end: Option<f64>) -> Self {
@@ -38,6 +41,7 @@ impl SecondsLocator {
             end,
             next: 0,
             probes: BTreeMap::new(),
+            empty_ranges: BTreeMap::new(),
         }
     }
     pub fn next_packet(&self) -> usize {
@@ -54,7 +58,11 @@ impl SecondsLocator {
                 end,
             }
         });
-        self.probes.insert(self.next, timing);
+        if let Some(timing) = timing {
+            self.probes.insert(self.next, timing);
+        } else {
+            self.remember_empty(self.next);
+        }
         match self.locate() {
             Ok(range) => Ok(Some(range)),
             Err(Pending::Read(index)) => {
@@ -64,20 +72,51 @@ impl SecondsLocator {
             Err(Pending::Error(message)) => Err(message.into()),
         }
     }
+    fn remember_empty(&mut self, index: usize) {
+        let mut start = index;
+        let mut end = index + 1;
+        if let Some((&left, &right)) = self.empty_ranges.range(..=index).next_back() {
+            if right >= index {
+                start = left;
+                end = end.max(right);
+                self.empty_ranges.remove(&left);
+            }
+        }
+        if let Some(&right) = self.empty_ranges.get(&end) {
+            self.empty_ranges.remove(&end);
+            end = right;
+        }
+        self.empty_ranges.insert(start, end);
+    }
+    fn empty_range(&self, index: usize) -> Option<Range<usize>> {
+        self.empty_ranges
+            .range(..=index)
+            .next_back()
+            .and_then(|(&start, &end)| (index < end).then_some(start..end))
+    }
     fn next_valid(&self, mut index: usize, end: usize) -> Result<Option<Timing>, Pending> {
         while index < end {
-            match self.probes.get(&index).ok_or(Pending::Read(index))? {
-                Some(timing) => return Ok(Some(*timing)),
-                None => index += 1,
+            if let Some(timing) = self.probes.get(&index) {
+                return Ok(Some(*timing));
+            }
+            if let Some(empty) = self.empty_range(index) {
+                index = empty.end;
+            } else {
+                return Err(Pending::Read(index));
             }
         }
         Ok(None)
     }
     fn previous_valid(&self, mut end: usize) -> Result<Option<Timing>, Pending> {
         while end > 0 {
-            end -= 1;
-            if let Some(timing) = self.probes.get(&end).ok_or(Pending::Read(end))? {
+            let index = end - 1;
+            if let Some(timing) = self.probes.get(&index) {
                 return Ok(Some(*timing));
+            }
+            if let Some(empty) = self.empty_range(index) {
+                end = empty.start;
+            } else {
+                return Err(Pending::Read(index));
             }
         }
         Ok(None)
@@ -199,6 +238,7 @@ impl SecondsLocator {
         Ok(LocatedRange {
             packets: selected_start..selected_end,
             origin: first.start,
+            first_valid_packet: first.index,
         })
     }
 }

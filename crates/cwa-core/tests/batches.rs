@@ -442,3 +442,42 @@ fn true_domain_start_needs_only_two_samples_for_its_linear_edge() {
     }
     panic!("first linear-edge target was not delivered");
 }
+
+#[test]
+fn seconds_location_crosses_a_long_empty_prefix_without_rereading_it_for_context() {
+    use cwa_core::data::CutConfig;
+    let leading = 10_000;
+    let valid = recording(4, 50);
+    let mut bytes = vec![0u8; 1024 + (leading + 4) * 512];
+    bytes[..2].copy_from_slice(b"MD");
+    bytes[1024 + leading * 512..].copy_from_slice(&valid[1024..]);
+    let mut session = CwaBatchSession::new(
+        bytes.len() as u64,
+        CwaReadOptions {
+            cut: CutConfig::Seconds {
+                start: Some(1.2),
+                end: Some(1.8),
+            },
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let mut requests = 0;
+    let mut timestamps = Vec::new();
+    while let Some(request) = session.request() {
+        requests += 1;
+        assert!(
+            requests < leading + 100,
+            "known-empty prefix was read again for a nonexistent predecessor"
+        );
+        if let Some(batch) = session
+            .provide(&bytes[request.offset as usize..request.offset as usize + request.length])
+            .unwrap()
+        {
+            timestamps.extend(batch.timestamps);
+        }
+    }
+    assert_eq!(timestamps.len(), 30);
+    assert_eq!(timestamps.first(), Some(&1_325_376_001_200_000));
+    assert_eq!(timestamps.last(), Some(&1_325_376_001_780_000));
+}
