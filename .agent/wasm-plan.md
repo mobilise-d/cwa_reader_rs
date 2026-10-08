@@ -1,9 +1,7 @@
 # Browser builds and parser separation
 
-Status: main-branch merge resolved after PR #8 merged upstream; commit review and
-PR delivery remain. The previous browser delivery and reviewed history remain intact.
-
-COMPACTION CONTINUITY: Re-read implement-code-change and the task-defining artifacts before continuing after compaction or session restoration.
+Status: previous delivery complete. Merge a686c45 reviewed in job 14187, pushed,
+and PR #7 confirmed ready and mergeable. New work is in .agent/packet-batches-plan.md.
 
 ## Main-branch merge
 
