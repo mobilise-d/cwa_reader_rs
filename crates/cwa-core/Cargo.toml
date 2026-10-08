@@ -1,6 +1,6 @@
 [package]
 name = "cwa-core"
-version = "0.4.0"
+version = "0.5.0"
 edition = "2021"
 license = "MIT"
 description = "CWA recording parsing, metadata, resampling and CSV over Rust readers and writers"

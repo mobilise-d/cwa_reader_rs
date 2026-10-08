@@ -17,7 +17,7 @@ channels:
   - https://repo.prefix.dev/emscripten-forge-4x
   - conda-forge
 dependencies:
-  - cwa_reader_rs=0.4.0
+  - cwa_reader_rs=0.5.0
   - xeus-python=0.19.0=py313he5686da_3
   - pytest=8.4.2
 ''')

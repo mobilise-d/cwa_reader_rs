@@ -37,12 +37,12 @@ toolchains.
 ## Install the precompiled npm package
 
 `./wasm/build.sh` also creates `wasm/dist/mobilise-d-cwa-reader-VERSION.tgz`.
-The version comes from the Python Cargo package, currently 0.4.0. Download the
+The version comes from the Python Cargo package, currently 0.5.0. Download the
 `standalone-browser-npm` CI artifact or build locally, then install the tarball
 in your application:
 
 ```sh
-npm install /path/to/mobilise-d-cwa-reader-0.4.0.tgz
+npm install /path/to/mobilise-d-cwa-reader-0.5.0.tgz
 ```
 
 ```js
