@@ -638,6 +638,7 @@ pub(crate) fn decode_loaded_batch(
     }
     let options = &plan.options.channels;
     let mut source = Vec::new();
+    let mut result = empty_result(options);
     let mut previous_end = plan.previous_packet_end;
     let mut origin = plan.recording_origin_seconds;
     let mut first_domain = plan.first_domain_sample_us;
@@ -673,6 +674,24 @@ pub(crate) fn decode_loaded_batch(
         if index >= plan.owned_packets.end {
             owned_end.get_or_insert(timestamps[0] as f64 / 1_000_000.0);
         }
+        let temperature = block.get_temperature_celsius();
+        let light = block.get_light_calibrated();
+        let battery = block.get_battery_voltage();
+        if plan.options.resample.is_none() {
+            if plan.owned_packets.contains(&index) {
+                append_original_packet(
+                    &mut result,
+                    &timestamps,
+                    &samples,
+                    temperature,
+                    light,
+                    battery,
+                    |time| in_batch_time_range(plan, origin, time),
+                )?;
+            }
+            continue;
+        }
+        reserve_column(&mut source, samples.len())?;
         for (timestamp, sample) in timestamps.into_iter().zip(samples) {
             let time_seconds = timestamp as f64 / 1_000_000.0;
             if plan.owned_packets.contains(&index)
@@ -681,22 +700,20 @@ pub(crate) fn decode_loaded_batch(
                 observed.gyro |= sample.gyro_x.is_some();
                 observed.magnetometer |= sample.mag_x.is_some();
             }
-            reserve_column(&mut source, 1)?;
             source.push((
                 index,
                 timestamp,
                 TimedSample {
                     time_seconds,
                     sample,
-                    temperature: block.get_temperature_celsius(),
-                    light: block.get_light_calibrated(),
-                    battery: block.get_battery_voltage(),
+                    temperature,
+                    light,
+                    battery,
                 },
             ));
         }
     }
     let mut grid_origin = plan.grid_origin_seconds;
-    let mut result = empty_result(options);
     if let Some(resample) = plan.options.resample {
         if let Some((_, _, first)) = source.first() {
             let start = match plan.options.cut {
@@ -799,14 +816,6 @@ pub(crate) fn decode_loaded_batch(
                 }
             }
         }
-    } else {
-        for (index, timestamp, sample) in source {
-            if plan.owned_packets.contains(&index)
-                && in_batch_time_range(plan, origin, sample.time_seconds)
-            {
-                append_original_sample(&mut result, timestamp, &sample)?;
-            }
-        }
     }
     if let Some(offset) = plan.options.fixed_utc_offset_us {
         for timestamp in &mut result.timestamps {
@@ -837,39 +846,84 @@ fn in_batch_time_range(
     }
 }
 
-fn append_original_sample(
+// All samples in a packet share the same sensor layout. Reserve each output
+// column once for the retained packet, then append without per-value allocation.
+fn append_original_packet(
     result: &mut CwaDataResult,
-    timestamp: i64,
-    sample: &TimedSample,
+    timestamps: &[i64],
+    samples: &[SampleData],
+    temperature: f32,
+    light: f32,
+    battery: f32,
+    keep: impl Fn(f64) -> bool,
 ) -> Result<(), CwaError> {
-    checked_sample_count(result.timestamps.len(), 1)?;
-    reserve_column(&mut result.timestamps, 1)?;
+    let retained = timestamps
+        .iter()
+        .filter(|&&time| keep(time as f64 / 1_000_000.0))
+        .count();
+    if retained == 0 {
+        return Ok(());
+    }
+    let previous_len = result.timestamps.len();
+    checked_sample_count(previous_len, retained)?;
+    reserve_column(&mut result.timestamps, retained)?;
     for column in [&mut result.acc_x, &mut result.acc_y, &mut result.acc_z] {
-        reserve_column(column, 1)?;
+        reserve_column(column, retained)?;
     }
-    result.timestamps.push(timestamp);
-    result.acc_x.push(sample.sample.acc_x);
-    result.acc_y.push(sample.sample.acc_y);
-    result.acc_z.push(sample.sample.acc_z);
-    let previous_len = result.timestamps.len() - 1;
+    let layout = &samples[0];
     for (column, value) in [
-        (&mut result.gyro_x, sample.sample.gyro_x),
-        (&mut result.gyro_y, sample.sample.gyro_y),
-        (&mut result.gyro_z, sample.sample.gyro_z),
-        (&mut result.mag_x, sample.sample.mag_x),
-        (&mut result.mag_y, sample.sample.mag_y),
-        (&mut result.mag_z, sample.sample.mag_z),
+        (&mut result.gyro_x, layout.gyro_x),
+        (&mut result.gyro_y, layout.gyro_y),
+        (&mut result.gyro_z, layout.gyro_z),
+        (&mut result.mag_x, layout.mag_x),
+        (&mut result.mag_y, layout.mag_y),
+        (&mut result.mag_z, layout.mag_z),
     ] {
-        append_sensor_value(column, value, previous_len)?;
-    }
-    for (column, value) in [
-        (&mut result.temperatures, sample.temperature),
-        (&mut result.light_values, sample.light),
-        (&mut result.battery_levels, sample.battery),
-    ] {
+        if value.is_some() {
+            ensure_sensor_column(column, previous_len)?;
+        }
         if let Some(values) = column {
-            reserve_column(values, 1)?;
-            values.push(value);
+            reserve_column(values, retained)?;
+        }
+    }
+    for values in [
+        &mut result.temperatures,
+        &mut result.light_values,
+        &mut result.battery_levels,
+    ]
+    .into_iter()
+    .flatten()
+    {
+        reserve_column(values, retained)?;
+    }
+    for (&timestamp, sample) in timestamps.iter().zip(samples) {
+        if !keep(timestamp as f64 / 1_000_000.0) {
+            continue;
+        }
+        result.timestamps.push(timestamp);
+        result.acc_x.push(sample.acc_x);
+        result.acc_y.push(sample.acc_y);
+        result.acc_z.push(sample.acc_z);
+        for (column, value) in [
+            (&mut result.gyro_x, sample.gyro_x),
+            (&mut result.gyro_y, sample.gyro_y),
+            (&mut result.gyro_z, sample.gyro_z),
+            (&mut result.mag_x, sample.mag_x),
+            (&mut result.mag_y, sample.mag_y),
+            (&mut result.mag_z, sample.mag_z),
+        ] {
+            if let Some(values) = column {
+                values.push(value.unwrap_or(f32::NAN));
+            }
+        }
+        for (column, value) in [
+            (&mut result.temperatures, temperature),
+            (&mut result.light_values, light),
+            (&mut result.battery_levels, battery),
+        ] {
+            if let Some(values) = column {
+                values.push(value);
+            }
         }
     }
     Ok(())
