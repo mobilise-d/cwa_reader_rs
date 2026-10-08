@@ -4,6 +4,11 @@ These tools measure an explicitly installed current reader with configurable
 packet batches. Keep real recordings and full JSON reports outside this repository. Use dataset aliases in
 reports shared with reviewers.
 
+Install the native reader from the [Python distribution](../../python/README.md),
+whose manifest and package sources live under `python/`. Run these benchmark
+commands from the repository root; their explicitly selected interpreter must
+have that distribution installed.
+
 A native invocation runs one case in a fresh Python process:
 
 ```sh
@@ -40,7 +45,7 @@ fingerprinting. `total_process_peak_rss_bytes` includes fingerprinting. Neither
 timer includes metadata/imports. Keep fingerprints in private reports.
 
 Prepare the Xeus output with `tools/wasm/build-xeus.sh`, `parity.py` and
-`prepare-runtime.py` as documented in [the Xeus build guide](../../docs/xeus-wasm.md).
+`prepare-runtime.py` as documented in [the Xeus build guide](../../recipes/xeus/README.md).
 Install Playwright in the runner environment and its Chromium browser. Supply a
 runtime adaptation of the official Emscripten WORKERFS backend compatible with the
 runtime. The downstream demo's `runtime/workerfs/workerfs.js` is one such adapter;

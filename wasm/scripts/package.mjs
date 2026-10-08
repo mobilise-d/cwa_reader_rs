@@ -7,7 +7,7 @@ import { fileURLToPath } from 'node:url';
 
 process.chdir(path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..'));
 
-const cargoMetadata = JSON.parse(execFileSync('cargo', ['+1.90.0', 'metadata', '--no-deps', '--format-version', '1', '--manifest-path', '../Cargo.toml'], { encoding: 'utf8' }));
+const cargoMetadata = JSON.parse(execFileSync('cargo', ['+1.90.0', 'metadata', '--no-deps', '--format-version', '1', '--manifest-path', '../python/Cargo.toml'], { encoding: 'utf8' }));
 const source = cargoMetadata.packages.find(pkg => pkg.name === 'cwa_reader_rs');
 const manifest = {
   name: '@mobilise-d/cwa-reader',
@@ -35,7 +35,7 @@ writeFileSync('pkg/README.md', readFileSync('js/npm-README.md'));
 const command = (...args) => execFileSync(args[0], args.slice(1), { encoding: 'utf8' }).trim();
 const buildMetadata = {
   source_revision: command('git', 'rev-parse', 'HEAD'),
-  source_dirty: command('git', 'status', '--porcelain', '--', '../src', '../crates', '../Cargo.toml', '../Cargo.lock', '.') !== '',
+  source_dirty: command('git', 'status', '--porcelain', '--', '../python', '../crates', '../Cargo.toml', '../Cargo.lock', '.') !== '',
   target: 'wasm32-unknown-unknown',
   rustc: command('rustc', '+1.90.0', '--version'),
   cargo: command('cargo', '+1.90.0', '--version'),

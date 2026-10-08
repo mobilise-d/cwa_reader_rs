@@ -14,7 +14,7 @@ from cwa_reader_rs import (
 )
 
 
-FIXTURE_DIR = Path(__file__).resolve().parent / "reference_data" / "openmovement"
+FIXTURE_DIR = Path(__file__).resolve().parents[2] / "tests/reference_data" / "openmovement"
 CWA_FILE = FIXTURE_DIR / "example-610-steps.cwa"
 
 

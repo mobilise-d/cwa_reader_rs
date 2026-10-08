@@ -1,21 +1,5 @@
-[package]
-name = "cwa_reader_rs"
-version = "0.4.0"
-edition = "2021"
-license = "MIT"
-exclude = ["tests/**"]
-
 [workspace]
-members = ["crates/cwa-core"]
-default-members = [".", "crates/cwa-core"]
+members = ["crates/cwa-core", "python"]
+default-members = ["crates/cwa-core", "python"]
 exclude = ["wasm"]
 resolver = "2"
-
-[lib]
-name = "cwa_reader_rs"
-crate-type = ["cdylib"]
-
-[dependencies]
-cwa-core = { version = "0.4.0", path = "crates/cwa-core" }
-pyo3 = { version = "0.26", features = ["extension-module"] }
-numpy = "0.26"

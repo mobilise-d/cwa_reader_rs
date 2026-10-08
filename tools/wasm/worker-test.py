@@ -56,7 +56,7 @@ try:
     class Summary:
         def pytest_sessionfinish(self, session, exitstatus):
             report['pytest_tests_collected'] = session.testscollected
-    report['pytest_exit_code'] = int(pytest.main(['-q', str(root / 'tests'), '-p', 'no:cacheprovider'], plugins=[Summary()]))
+    report['pytest_exit_code'] = int(pytest.main(['-q', str(root / 'python/tests'), '-p', 'no:cacheprovider'], plugins=[Summary()]))
     report['pytest_seconds'] = time.perf_counter() - start
     # Recover output from worker storage through the same worker JS bridge.
     csv = (root / 'export.csv').read_bytes()

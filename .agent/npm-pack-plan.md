@@ -78,3 +78,43 @@ configuration. Metadata matches native; the selected 840 sample rows have exact
 integer timestamps and acceleration. CI includes this check and uploads the
 standalone-browser-npm artifact. Final review, CI artifact proof and delivery
 remain pending. No parser behavior or native/Xeus build was changed.
+
+## Python distribution and documentation relocation
+
+The user further requested that the Python wrapper leave the repository root,
+with a short root README explaining the project and linking to per-crate and
+per-distribution READMEs. Move the Python distribution coherently to python/,
+keep the shared core at crates/cwa-core/ and standalone distribution at wasm/.
+The root Cargo manifest becomes the shared workspace. Preserve Python signatures,
+native wheels/sdist behavior, Xeus recipe/runtime pins, shared test fixtures and
+all browser readers. No legacy root forwarding crate or duplicate parser.
+
+Core agent owns the precise Python path mapping, Python manifest/source/config,
+native CI and tests, python/README.md and crates/cwa-core/README.md. Standalone
+owns its build/test/CI path updates and moves its detailed guide to wasm/README.md.
+Xeus owns recipe, tools/wasm, Xeus CI/guide and benchmark-tool path updates. Parent
+owns root README, this plan and final integration. Agents coordinate path mapping
+before dependent edits. Shared reference fixtures need not move merely for layout.
+
+Each relocation slice must update its consumers and pass focused checks before
+commit. Final gates include the native tests and clean sdist-built wheel, actual
+Xeus build/browser parity, standalone npm archive plus production consumer tests,
+link/path checks and final scope review from the recorded d9c61a1 base. Earlier
+package-only evidence remains useful but is not a substitute for post-move builds.
+
+The Python move and its native/Xeus/standalone consumers are inseparable: parent
+will commit them atomically with the root and distribution READMEs after native
+and standalone focused checks and Xeus path/recipe checks. Agents leave these
+relocation edits uncommitted for that explicit integration commit. Xeus rebuilds
+its complete artifact/browser proof from the resulting clean commit. Python tests
+move to python/tests; shared tests/reference_data stays at the root.
+
+The user also requested READMEs for the other crates/distributions and common
+information under /docs. Distribution entry points are python/README.md,
+wasm/README.md and recipes/xeus/README.md; the core has its own README. Shared
+reader behavior, timestamp interpretation and cross-target validation live in
+docs/{reader-behavior,timestamps,validation}.md, with docs/README.md as the index
+and the existing shared benchmark report retained. Move the former Xeus guide
+out of docs into its recipe README, remove obsolete guide paths, and update
+incoming links. Distribution-specific examples stay with their distributions;
+shared explanations are linked rather than copied. Root README stays an overview.

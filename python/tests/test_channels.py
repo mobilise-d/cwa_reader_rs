@@ -7,7 +7,7 @@ import pytest
 from cwa_reader_rs import blocks, read_cwa_file, seconds
 
 
-SOURCE = Path(__file__).parent / "reference_data/openmovement/example-610-steps.cwa"
+SOURCE = Path(__file__).resolve().parents[2] / "tests/reference_data/openmovement/example-610-steps.cwa"
 
 
 def _recording(tmp_path: Path, axes: int, packing: int = 2) -> Path:

@@ -19,7 +19,7 @@ fixture = root / "tests/reference_data/openmovement/example-610-steps.cwa"
 reference = checkout / "tests/reference_data/openmovement/example-610-steps.cwa"
 reference.parent.mkdir(parents=True, exist_ok=True)
 shutil.copyfile(fixture, reference)
-sys.path.insert(0, str(root / "tests"))
+sys.path.insert(0, str(root / "python/tests"))
 from test_channels import _recording
 
 spec = importlib.util.spec_from_file_location("cwa_parity_cases", root / "tools/wasm/parity.py")

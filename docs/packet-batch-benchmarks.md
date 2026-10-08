@@ -6,12 +6,14 @@ The returned data has acceleration, gyroscope and auxiliary channels: nine
 float32 columns. The input and participant-derived fingerprints remain outside
 the repository.
 
-The final native and Xeus package source is
+The optimized native and Xeus measurements use source
 `f0d08d922ec1d926c0e20a67270b7201a6cd6da9`. The source-clean Emscripten conda
 artifact SHA256 is
 `8b739122fdcc7851cae159933244d27be2489ae0af4e2cd50479c4237ac3f430`.
 The actual Xeus worker passed 128 Python tests and 25 native/browser comparisons.
-See [the build guide](xeus-wasm.md) for the pinned runtime and install commands.
+The Python distribution now lives in [`python/`](../python/README.md); the
+measurements below identify their original source revisions.
+See [the build guide](../recipes/xeus/README.md) for the pinned runtime and install commands.
 
 ## Measurement conditions
 

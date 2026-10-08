@@ -35,7 +35,7 @@ def cases(root):
     for hours in (5.5, -3.5, 0):
         yield f'offset-{hours}', path, {'fixed_utc_offset_timezone': datetime.timezone(datetime.timedelta(hours=hours)), 'cut': reader.seconds(1.2, 3.7)}
     # Use repository fixture builders for recorded-zero and packed channel cases.
-    sys.path.insert(0, str(root / 'tests'))
+    sys.path.insert(0, str(root / 'python/tests'))
     from test_channels import _recording
     folder = root / 'generated'
     folder.mkdir(exist_ok=True)
@@ -121,7 +121,8 @@ if __name__ == '__main__':
     out = Path(sys.argv[2]).resolve()
     out.mkdir(parents=True, exist_ok=True)
     checkout = out / 'native-checkout'
-    shutil.copytree(root / 'tests', checkout / 'tests', dirs_exist_ok=True)
+    shutil.copytree(root / 'python/tests', checkout / 'python/tests', dirs_exist_ok=True)
+    shutil.copytree(root / 'tests/reference_data', checkout / 'tests/reference_data', dirs_exist_ok=True)
     report, arrays = collect(checkout)
     (out / 'native-report.json').write_text(json.dumps(report, indent=2) + '\n')
     np.savez_compressed(out / 'native-arrays.npz', **arrays)

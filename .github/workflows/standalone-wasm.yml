@@ -28,7 +28,7 @@ jobs:
       - name: Build native comparison package from this checkout
         run: |
           uv venv --python 3.13 /tmp/cwa-browser-native
-          uv pip install --python /tmp/cwa-browser-native/bin/python . pytest
+          uv pip install --python /tmp/cwa-browser-native/bin/python ./python pytest
           echo 'CWA_NATIVE_PYTHON=/tmp/cwa-browser-native/bin/python' >> "$GITHUB_ENV"
       - name: Install matching Wasm binding generator
         run: cargo install wasm-bindgen-cli --version 0.2.129 --locked
@@ -68,7 +68,7 @@ jobs:
             wasm/scripts/serve.mjs
             wasm/package.json
             wasm/package-lock.json
-            docs/standalone-wasm.md
+            wasm/README.md
       - name: Upload installable local npm package
         uses: actions/upload-artifact@v4
         with:

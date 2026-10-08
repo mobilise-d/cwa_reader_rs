@@ -1,9 +1,12 @@
 # Standalone browser reader
 
 `wasm/` builds a browser module directly from the shared `crates/cwa-core` crate.
-The core has no Python dependencies; the root crate is the Python extension.
+The core has no Python dependencies; `python/` contains the Python extension.
 It uses `wasm32-unknown-unknown`, Rust 1.90.0 and wasm-bindgen 0.2.129. This bundle
-is independent of the Xeus Python extension and its Emscripten ABI.
+is independent of the [Xeus Python extension](../recipes/xeus/README.md) and its
+Emscripten ABI. Shared [reader behavior](../docs/reader-behavior.md),
+[timestamp rules](../docs/timestamps.md) and [validation](../docs/validation.md)
+apply to both distributions.
 
 ## Build and run locally
 
@@ -34,7 +37,7 @@ toolchains.
 ## Install the precompiled npm package
 
 `./wasm/build.sh` also creates `wasm/dist/mobilise-d-cwa-reader-VERSION.tgz`.
-The version comes from the root Cargo package, currently 0.4.0. Download the
+The version comes from the Python Cargo package, currently 0.4.0. Download the
 `standalone-browser-npm` CI artifact or build locally, then install the tarball
 in your application:
 
@@ -202,40 +205,27 @@ finishes; an already-started Blob read cannot be cancelled by this adapter.
 | `readCwaFileBatches(source, options?)` | Async iterator of selected `CwaSamples`, reading bounded File slices. |
 | `writeCwaCsvBatches(source, options?)` | Async iterator of CSV `Uint8Array` chunks, with one header. |
 
-Options use the same names as Python for channel flags, `resample_hz` and
-`resample_method`. Cubic resampling includes the existing linear edge behavior.
-Seconds cuts start relative to the first valid sample. Block cuts count 512-byte
-data packets after the header. Omitting `cut` reads the full recording.
+Options use the Python names for channel flags, `resample_hz` and
+`resample_method`. See [shared reader behavior](../docs/reader-behavior.md)
+for cut boundaries, resampling, channel defaults and packet ownership.
 
-`batchPackets` counts owned 512-byte data packets, not output rows. It defaults
-to 256. `overlapPackets` defaults to one physical packet on each side, clipped
-at actual file boundaries. Both options also apply to `readCwaFile` and
-`writeCwaCsv`, whose full results collect the same engine. Independent batches
-share one resampling grid and exclusive output ownership; overlap samples are
-not emitted twice. Packet times are assumed ordered. Seconds cuts use rate-guided
-packet probes and corrections instead of scanning the complete recording.
-CSV performs a bounded channel-union pass before emitting its header and data.
-
-If skipped or sparse packets leave insufficient timestamp/interpolation context
-inside the configured preload, parsing throws an `Error` with
+`batchPackets` counts owned 512-byte data packets and defaults to 256;
+`overlapPackets` defaults to 1. Both also apply to the full-byte collectors.
+Insufficient configured context throws a JavaScript `Error` with
 `code === 'InsufficientContext'`, `side`, `ownedPackets`, `loadedPackets` and
-`reason`. Packet ranges are `[start, end]`, end exclusive. Increase
-`overlapPackets` for a fresh read. The decoder does not refill or emit partial
-samples from a failed batch. Earlier delivered batches remain valid.
+`reason`. Its packet ranges are `[start, end]`, end exclusive.
 
-`readCwaFile` includes temperature, light and battery by default; `writeCwaCsv`
-omits these auxiliary columns by default. Magnetometer inclusion defaults to true
-in both. Gyro/magnetometer columns occur only when the selected samples contain
-those sensors. Real zero measurements remain zero; missing samples in a present
-channel are `NaN`, and absent channels have no property in `columns`.
-Individual batches can have different optional channels. A collector must form
-their union and fill missing rows with `NaN`; the full-byte API does this in Rust.
+Absent channels have no property in `columns`; missing samples in a present
+channel are `NaN`. Individual batches can have different optional channels.
+A collector must form their union and fill missing rows with `NaN`; the
+full-byte API does this in Rust.
 
 `fixed_utc_offset_seconds` replaces Python's fixed `datetime.timezone` object.
 It accepts a finite offset strictly inside +/-24 hours, rounded to microseconds
 with ties to even. The offset is subtracted from the device clock. Supplying it,
 including zero, makes `data.timezone` equal to `'UTC'`; omission gives `null` for
-naive time. It does not infer an IANA timezone or DST rules.
+naive time. See [timestamp semantics](../docs/timestamps.md) for the device clock
+and fixed-offset interpretation.
 
 ## Timestamp and output precision
 
@@ -253,11 +243,9 @@ values are `null`. `readHeader` omits `start_from_data_raw` and `end_from_data_r
 which require data packets. A header preview cannot establish actual sample
 count, timing or measured channels.
 
-CSV preserves the native writer's formatting, including four decimal places for
-numeric `time` and six for channel values. CSV formatting therefore has lower
-timestamp precision than the sample arrays. Invalid input/options throw a
-JavaScript `Error`; callers can catch it and process another file with the same
-module.
+CSV uses the [shared output formatting](../docs/timestamps.md). Invalid
+input/options throw a JavaScript `Error`; callers can catch it and process
+another file with the same module.
 
 ## Copies and memory
 
@@ -280,20 +268,13 @@ A small cut reduces output size, but does not reduce that full input copy.
 No path, temporary file or virtual filesystem is required by either interface.
 There is no zero-copy loading or all-day collector memory guarantee.
 
-Metadata lookup seeks the first and last usable packets and their needed
-predecessor; the sampling consistency report scans packet metadata throughout
-the recording. Neither operation allocates decoded sample columns. The File
-facade reads requested ranges; the byte API copies its complete input into Wasm.
-Metadata lookup does not validate unvisited interior packets; use decoding or
-the consistency report to inspect them.
-
 ## Browser tests and measurements
 
 Build the native package from the same checkout, then run:
 
 ```sh
 uv venv --python 3.13 /tmp/cwa-browser-native
-uv pip install --python /tmp/cwa-browser-native/bin/python . pytest
+uv pip install --python /tmp/cwa-browser-native/bin/python ./python pytest
 cd wasm
 npm ci
 npx playwright install chromium
@@ -302,12 +283,11 @@ CWA_NATIVE_PYTHON=/tmp/cwa-browser-native/bin/python npm test
 CWA_NATIVE_PYTHON=/tmp/cwa-browser-native/bin/python npm run test:package
 ```
 
-Eighteen actual Chromium tests compare full metadata/report fields and 31 sample/CSV
-cases against the native Python package from the same checkout. Cases cover full
-reads, block/seconds cuts, resampling, channel flags, packed samples, 3/6/9-axis and
-mixed layouts, recorded zeros, missing values, fixed positive/negative/zero and
-fractional offsets, native error messages, and a real worker CSV download. An
-early worker load failure leaves header preview usable and full actions disabled.
+Eighteen actual Chromium tests compare the byte and File interfaces with the
+native Python package from the same checkout. The [shared validation guide](../docs/validation.md)
+describes the 31 parser/sample/CSV cases, exact timestamp checks and numerical
+tolerances. Browser-specific checks include a worker CSV download and an early
+worker load failure that keeps full actions disabled while header preview works.
 File metadata/report tests use Files, Blobs and real file handles, compare native
 fields and errors, and resolve each handle once per operation. A 512 MiB sparse
 file in browser storage matches native metadata while worker instrumentation
@@ -317,20 +297,10 @@ concatenate all 31 cases at different packet counts,
 check the exact global resampling grid across boundaries, compare CSV chunks,
 and verify cancellation, backpressure and structured insufficient-context errors.
 
-Timestamps and raw sensor values compare exactly. Raw calibrated light uses a
-one-float32-ULP bound because `10_f32.powf(raw / 341)` uses different math runtimes
-on native and standalone Wasm. The observed maximum difference on this fixture
-was 0.000003814697265625, with relative difference at most 1.05e-7. Resampled
-columns allow `rtol=1e-6`, `atol=1e-6`, with identical NaN locations. CSV compares
-byte-for-byte except explicitly requested calibrated light, where the bound also
-allows 1e-6 for six-decimal printing; all other fields stay exact.
-
-Tests read the third-party `example-610-steps.cwa` directly from the source
-checkout and reuse existing channel fixture builders. Provenance and the
-redistribution limitation are in `tests/reference_data/openmovement/README.md`.
-Generated comparison inputs live in ignored `wasm/.test-data/`. Neither CWA
-fixtures, native arrays nor recovered CSV are bundled or uploaded as artifacts.
-The local server exposes test inputs only with `--test-fixtures`.
+Generated comparison inputs live in ignored `wasm/.test-data/`. CWA fixtures,
+native arrays and recovered CSV are excluded from runtime artifacts. The local
+server exposes test inputs only with `--test-fixtures`; fixture provenance and
+redistribution limits are documented in the shared validation guide.
 
 `wasm/test-results/header-metrics.json` and `recording-metrics.json` record browser
 version, timings, selected output sizes and committed Wasm memory. These are

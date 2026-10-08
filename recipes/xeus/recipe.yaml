@@ -13,6 +13,10 @@ source:
       - dist/**
       - .agent/**
       - tests/**
+      - python/tests/**
+      - python/.venv/**
+      - python/dist/**
+      - python/target/**
 build:
   number: 0
   script: build.sh

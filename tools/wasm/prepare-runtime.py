@@ -32,9 +32,10 @@ config.setdefault('jupyter-config-data', {})['exposeAppInBrowser'] = True
 config_path.write_text(json.dumps(config, indent=2))
 assets.mkdir(parents=True, exist_ok=True)
 with zipfile.ZipFile(assets / 'checkout-tests.zip', 'w', zipfile.ZIP_DEFLATED) as archive:
-    for path in sorted((repo / 'tests').rglob('*')):
-        if path.is_file() and '__pycache__' not in path.parts:
-            archive.write(path, path.relative_to(repo))
+    for folder in ('python/tests', 'tests/reference_data'):
+        for path in sorted((repo / folder).rglob('*')):
+            if path.is_file() and '__pycache__' not in path.parts:
+                archive.write(path, path.relative_to(repo))
     archive.write(repo / 'tools/wasm/parity.py', 'parity.py')
 for name in ('native-report.json', 'native-arrays.npz'):
     shutil.copyfile(out / name, assets / name)

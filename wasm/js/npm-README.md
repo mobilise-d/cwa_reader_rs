@@ -53,3 +53,8 @@ different optional channels. Byte API options retain native channel/cut semantic
 Device-clock metadata strings are naive; the parser does not infer a timezone.
 
 `build-metadata.json` records the source revision, compiler versions and checksums.
+
+Shared behavior, timestamp rules and validation are documented in the
+[repository docs](https://github.com/mobilise-d/cwa_reader_rs/tree/main/docs).
+The [standalone guide](https://github.com/mobilise-d/cwa_reader_rs/tree/main/wasm)
+contains build and deployment instructions.

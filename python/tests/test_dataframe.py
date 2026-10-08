@@ -15,7 +15,7 @@ from cwa_reader_rs import (
 )
 
 
-SOURCE = Path(__file__).parent / "reference_data/openmovement/example-610-steps.cwa"
+SOURCE = Path(__file__).resolve().parents[2] / "tests/reference_data/openmovement/example-610-steps.cwa"
 
 
 def test_reader_returns_dataframe_with_naive_datetime_index() -> None:

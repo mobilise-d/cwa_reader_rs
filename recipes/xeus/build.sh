@@ -18,14 +18,16 @@ p=Path(os.environ['PREFIX'])/'share/cwa-reader-build'
 s=runpy.run_path(os.environ['MATURIN_PYTHON_SYSCONFIGDATA_DIR'])['build_time_vars']
 (p/'target-sysconfig.json').write_text(json.dumps(s,indent=2))
 files = sorted([
-    *Path('src').rglob('*.rs'), *Path('crates').rglob('*.rs'),
+    *Path('python/src').rglob('*.rs'), *Path('crates').rglob('*.rs'),
     *Path('crates').rglob('Cargo.toml'), *Path('crates').rglob('LICENSE*'),
-    Path('Cargo.toml'), Path('Cargo.lock'), Path('pyproject.toml'),
-    Path('README.md'), Path('LICENSE'),
+    *Path('crates').rglob('README*'),
+    Path('Cargo.toml'), Path('Cargo.lock'), Path('python/Cargo.toml'),
+    Path('python/pyproject.toml'), Path('python/README.md'),
+    Path('python/LICENSE'), Path('LICENSE'),
 ])
 (p/'source-files.json').write_text(json.dumps({str(f): hashlib.sha256(f.read_bytes()).hexdigest() for f in files}, indent=2))
 PY
 rustc -Vv > "$PREFIX/share/cwa-reader-build/rustc.txt"
 emcc -v 2> "$PREFIX/share/cwa-reader-build/emcc.txt"
 maturin --version > "$PREFIX/share/cwa-reader-build/maturin.txt"
-"$PYTHON" -m pip install . --no-build-isolation --no-deps -vv
+"$PYTHON" -m pip install ./python --no-build-isolation --no-deps -vv

@@ -1,9 +1,11 @@
 # Xeus Python WASM package
 
 The `recipes/xeus` recipe produces a local `emscripten-wasm32` conda package
-containing a CPython extension side module. It preserves the existing path-based
-Python API. The standalone JavaScript build is described separately in
-[`standalone-wasm.md`](standalone-wasm.md).
+containing a CPython extension side module built from the [Python distribution](../../python/README.md).
+Run the commands below from the repository root. It preserves the existing path-based
+Python API. Shared reader behavior and timestamp semantics are described in
+[the common documentation](../../docs/README.md). The standalone JavaScript build is described separately in
+[the standalone distribution](../../wasm/README.md).
 
 ## Reproduce locally (Linux x86-64)
 
@@ -48,7 +50,7 @@ are dependency metadata, not bundled library copies. Exact solved build/host
 package URLs and checksums are retained in the conda package's
 `info/recipe/rendered_recipe.yaml`. Compiler output, target sysconfig and SHA256
 of the compiled source files are in `share/cwa-reader-build`. The hashes include
-root Python adapter sources, nested `crates/cwa-core` Rust sources and Cargo
+`python/src` adapter sources, nested `crates/cwa-core` Rust sources and Cargo
 manifests, along with package metadata and licenses. The recipe stages the local
 core crate from the same checkout as the Python adapter. The external
 `artifact-manifest.json` records source revision, dirty status and artifact hashes.
@@ -83,9 +85,9 @@ extension ABI.
 From the repository checkout, with the built channel available:
 
 ```sh
-uv sync --dev --python 3.13
-uv run --no-sync pytest -q tests
-uv run --no-sync python tools/wasm/parity.py "$PWD" /tmp/cwa-xeus
+uv sync --project python --dev --python 3.13
+uv run --project python --no-sync pytest -q python/tests
+uv run --project python --no-sync python tools/wasm/parity.py "$PWD" /tmp/cwa-xeus
 uv venv --python 3.13 /tmp/cwa-browser-tools
 uv pip install --python /tmp/cwa-browser-tools/bin/python \
   jupyterlite-xeus==5.1.0 jupyterlite-core==0.8.6 jupyterlab==4.6.4 \
@@ -144,7 +146,7 @@ and no persistent browser storage.
 
 The pinned Xeus runtime exposes `globalThis.Module.FS` inside the worker, but
 has no built-in WORKERFS backend. Load a compatible adapter before mounting.
-[The benchmark runner](../tools/benchmarks/xeus.py) accepts that adapter as an
+[The benchmark runner](../../tools/benchmarks/xeus.py) accepts that adapter as an
 explicit file and demonstrates the complete File transfer/mount/read sequence.
 It neither modifies nor rebuilds the downstream runtime. The adapter is a runtime
 integration dependency, separate from the Python extension package.
@@ -182,7 +184,7 @@ this is not zero-copy decoding. The full DataFrame API retains every selected
 sample, and DataFrame/array conversions can add allocations. Cuts reduce that
 output. `write_cwa_csv` processes bounded batches, but a CSV written to MEMFS
 still retains its complete output there. An external streaming sink is required
-to avoid that storage cost. See [the batch benchmarks](packet-batch-benchmarks.md)
+to avoid that storage cost. See [the batch benchmarks](../../docs/packet-batch-benchmarks.md)
 for measured full-file bounded decoding and browser File access.
 
 ## Local measurements and limits

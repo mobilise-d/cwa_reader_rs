@@ -33,9 +33,9 @@ jobs:
         run: tools/wasm/build-xeus.sh "$RUNNER_TEMP/cwa-xeus"
       - name: Native baseline from the same checkout
         run: |
-          uv sync --dev --python 3.13
-          uv run --no-sync pytest -q tests
-          uv run --no-sync python tools/wasm/parity.py "$GITHUB_WORKSPACE" "$RUNNER_TEMP/cwa-xeus"
+          uv sync --project python --dev --python 3.13
+          uv run --project python --no-sync pytest -q python/tests
+          uv run --project python --no-sync python tools/wasm/parity.py "$GITHUB_WORKSPACE" "$RUNNER_TEMP/cwa-xeus"
       - name: Install browser build and test tools
         run: |
           uv venv "$RUNNER_TEMP/cwa-browser-tools"
