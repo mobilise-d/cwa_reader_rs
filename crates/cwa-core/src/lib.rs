@@ -3,6 +3,7 @@
 pub mod data;
 pub mod errors;
 pub mod header;
+mod locate;
 mod packet;
 pub mod reader;
 

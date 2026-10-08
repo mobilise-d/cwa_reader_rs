@@ -338,3 +338,76 @@ fn unsupported_batch_sizes_fail_without_allocating_large_payloads() {
         .is_err());
     }
 }
+
+#[test]
+fn seconds_cuts_seek_to_a_narrow_window_in_a_large_recording() {
+    use cwa_core::data::CutConfig;
+    // A source range budget makes an accidental full-file metadata scan fail
+    // immediately, without allocating or reading a multi-gigabyte fixture.
+    let packets = 8_500_000usize;
+    let size = 1024 + packets as u64 * 512;
+    let options = CwaReadOptions {
+        cut: CutConfig::Seconds {
+            start: Some(200_000.3),
+            end: Some(200_060.3),
+        },
+        batch: BatchConfig {
+            packet_count: 7,
+            overlap_packets: 1,
+        },
+        ..Default::default()
+    };
+    let mut session = CwaBatchSession::new(size, options).unwrap();
+    let mut read_bytes = 0;
+    let mut read_calls = 0;
+    let mut timestamps = Vec::new();
+    while let Some(request) = session.request() {
+        read_bytes += request.length;
+        read_calls += 1;
+        assert!(
+            read_bytes < 100_000,
+            "narrow cut exceeded range-read budget"
+        );
+        let mut bytes = vec![0u8; request.length];
+        if request.offset == 0 {
+            bytes[..2].copy_from_slice(b"MD");
+        } else {
+            let first = ((request.offset - 1024) / 512) as usize;
+            for (offset, chunk) in bytes.chunks_mut(512).enumerate() {
+                use chrono::{Datelike, Timelike};
+                let time =
+                    chrono::DateTime::from_timestamp(1_704_067_200 + (first + offset) as i64, 0)
+                        .unwrap();
+                let rtc = ((time.year() as u32 - 2000) << 26)
+                    | (time.month() << 22)
+                    | (time.day() << 17)
+                    | (time.hour() << 12)
+                    | (time.minute() << 6)
+                    | time.second();
+                let mut packet = [0u8; 512];
+                let index = first + offset;
+                // The first packet's short duration intentionally predicts a
+                // position near1,000,000. Empty pages there require skipping and
+                // a correction jump before reaching the dense selected window.
+                if (999_990..1_000_010).contains(&index) {
+                    chunk.fill(0);
+                    continue;
+                }
+                packet[..2].copy_from_slice(b"AX");
+                packet[14..18].copy_from_slice(&rtc.to_le_bytes());
+                packet[24] = 0x49;
+                packet[25] = 0x32;
+                packet[28..30]
+                    .copy_from_slice(&(if index == 0 { 10u16 } else { 50u16 }).to_le_bytes());
+                chunk.copy_from_slice(&packet[..chunk.len()]);
+            }
+        }
+        if let Some(batch) = session.provide(&bytes).unwrap() {
+            timestamps.extend(batch.timestamps);
+        }
+    }
+    assert!(read_calls < 100);
+    assert_eq!(timestamps.len(), 3000);
+    assert_eq!(timestamps.first(), Some(&1_704_267_200_300_000));
+    assert_eq!(timestamps.last(), Some(&1_704_267_260_280_000));
+}

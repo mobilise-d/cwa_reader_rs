@@ -82,21 +82,9 @@ impl BatchDescriptor {
 enum Phase {
     Header,
     Seed(usize),
-    Timing(usize),
+    Locate,
     Payload,
     Finished,
-}
-
-/// The planner retains timestamps and ownership only. Each payload request is
-/// one contiguous window; overlap never grows automatically after decoding.
-struct SecondsPlanning {
-    previous_end: Option<f64>,
-    previous_valid: Option<usize>,
-    origin: Option<f64>,
-    first: Option<usize>,
-    last: Option<usize>,
-    following: Option<usize>,
-    selection_ended: bool,
 }
 
 struct CsvState {
@@ -111,7 +99,7 @@ pub struct CwaBatchSession {
     descriptor: BatchDescriptor,
     phase: Phase,
     history: VecDeque<(usize, f64)>,
-    seconds: Option<SecondsPlanning>,
+    seconds: Option<crate::locate::SecondsLocator>,
     csv: Option<CsvState>,
 }
 impl CwaBatchSession {
@@ -141,7 +129,14 @@ impl CwaBatchSession {
                 .end
                 .saturating_add(options.batch.overlap_packets)
                 .min(total_packets);
-        let seconds = matches!(options.cut, CutConfig::Seconds { .. });
+        let seconds = match options.cut {
+            CutConfig::Seconds { start, end } => Some(crate::locate::SecondsLocator::new(
+                total_packets,
+                start,
+                end,
+            )),
+            _ => None,
+        };
         Ok(Self {
             total_packets,
             descriptor: BatchDescriptor {
@@ -157,15 +152,7 @@ impl CwaBatchSession {
             phase: Phase::Header,
             history: VecDeque::new(),
             csv: None,
-            seconds: seconds.then_some(SecondsPlanning {
-                previous_end: None,
-                previous_valid: None,
-                origin: None,
-                first: None,
-                last: None,
-                following: None,
-                selection_ended: false,
-            }),
+            seconds,
         })
     }
     /// CSV first determines the union of selected output channels using bounded
@@ -224,15 +211,15 @@ impl CwaBatchSession {
                 offset: data::data_block_offset(index as u64).expect("validated packet offset"),
                 length: 30,
             }),
-            Phase::Timing(start) => Some(ReadRequest {
-                offset: data::data_block_offset(start as u64).expect("validated packet offset"),
-                length: self
-                    .descriptor
-                    .options
-                    .batch
-                    .packet_count
-                    .min(self.total_packets - start)
-                    * 512,
+            Phase::Locate => Some(ReadRequest {
+                offset: data::data_block_offset(
+                    self.seconds
+                        .as_ref()
+                        .expect("seconds locator")
+                        .next_packet() as u64,
+                )
+                .expect("validated packet offset"),
+                length: 30,
             }),
             Phase::Payload => Some(ReadRequest {
                 offset: data::data_block_offset(self.descriptor.loaded_packets.start as u64)
@@ -268,7 +255,7 @@ impl CwaBatchSession {
                     return Err("Not a valid CWA file".into());
                 }
                 self.phase = if self.seconds.is_some() {
-                    Phase::Timing(0)
+                    Phase::Locate
                 } else if self.descriptor.loaded_packets.start > 0 {
                     Phase::Seed(self.descriptor.loaded_packets.start - 1)
                 } else {
@@ -293,79 +280,17 @@ impl CwaBatchSession {
                 }
                 Ok(None)
             }
-            Phase::Timing(start) => {
-                let timing = self.seconds.as_mut().expect("seconds planning phase");
-                let CutConfig::Seconds {
-                    start: cut_start,
-                    end: cut_end,
-                } = self.descriptor.options.cut
-                else {
-                    unreachable!()
-                };
-                for (offset, packet) in bytes.chunks_exact(512).enumerate() {
-                    let index = start + offset;
-                    let buffer: &[u8; 512] = packet.try_into().expect("complete metadata packet");
-                    let Some(meta) = packet_meta(buffer)? else {
-                        continue;
-                    };
-                    let (mut t0, t1) = meta.natural_bounds();
-                    if let Some(previous) = timing.previous_end {
-                        if t0 - previous < 1.0 {
-                            t0 = previous;
-                        }
-                    }
-                    timing.previous_end = Some(t1);
-                    let origin = *timing.origin.get_or_insert(t0);
-                    if timing.last.is_some() && timing.following.is_none() {
-                        timing.following = Some(index);
-                    }
-                    if cut_end.is_some_and(|end| t0 >= origin + end) {
-                        timing.selection_ended = true;
-                    }
-                    if !timing.selection_ended
-                        && !cut_start.is_some_and(|start| t1 <= origin + start)
-                    {
-                        timing
-                            .first
-                            .get_or_insert(timing.previous_valid.unwrap_or(index));
-                        timing.last = Some(index);
-                        timing.following = None;
-                    }
-                    timing.previous_valid = Some(index);
-                }
-                let next = start + bytes.len() / 512;
-                if next < self.total_packets {
-                    self.phase = Phase::Timing(next);
-                } else {
-                    let timing = self.seconds.take().expect("seconds planning phase");
-                    let origin = timing.origin.ok_or("No valid sample data found")?;
-                    let first = timing
-                        .first
-                        .ok_or("No samples remain after applying seconds cut")?;
-                    let end = timing
-                        .following
-                        .or(timing.last)
-                        .expect("selected packets present")
-                        + 1;
-                    self.descriptor.selected_packets = first..end;
-                    self.descriptor.owned_packets = first
-                        ..first
-                            .saturating_add(self.descriptor.options.batch.packet_count)
-                            .min(end);
-                    self.descriptor.loaded_packets = first
-                        .saturating_sub(self.descriptor.options.batch.overlap_packets)
-                        ..self
-                            .descriptor
-                            .owned_packets
-                            .end
-                            .saturating_add(self.descriptor.options.batch.overlap_packets)
-                            .min(self.total_packets);
-                    self.descriptor.recording_origin_seconds = Some(origin);
-                    self.phase = if self.descriptor.loaded_packets.start > 0 {
-                        Phase::Seed(self.descriptor.loaded_packets.start - 1)
-                    } else {
-                        Phase::Payload
-                    };
+            Phase::Locate => {
+                if let Some(located) = self
+                    .seconds
+                    .as_mut()
+                    .expect("seconds locator")
+                    .provide(bytes)?
+                {
+                    self.descriptor.selected_packets = located.packets;
+                    self.descriptor.recording_origin_seconds = Some(located.origin);
+                    self.seconds = None;
+                    self.restart_payload();
                 }
                 Ok(None)
             }
