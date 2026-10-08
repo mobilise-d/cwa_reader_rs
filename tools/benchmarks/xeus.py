@@ -17,7 +17,6 @@ parser.add_argument('output', type=Path, help='built tools/wasm runtime output')
 parser.add_argument('file', type=Path)
 parser.add_argument('workerfs', type=Path, help='adapted official WORKERFS JavaScript backend')
 parser.add_argument('--report', type=Path, required=True)
-parser.add_argument('--cache-bytes', type=int, default=0)
 parser.add_argument('--batch-packets', type=int)
 parser.add_argument('--port', type=int, default=8795)
 parser.add_argument('--cases', default='metadata,report,early,middle,late')
@@ -34,7 +33,7 @@ results = []
 args.report.write_text('[]\n')
 receipt = args.output / 'artifact-manifest.json'
 metadata = {'reader_artifact':json.loads(receipt.read_text()) if receipt.exists() else None,
-            'cache_bytes':args.cache_bytes, 'workerfs_sha256':__import__('hashlib').sha256(args.workerfs.read_bytes()).hexdigest(),
+            'workerfs_sha256':__import__('hashlib').sha256(args.workerfs.read_bytes()).hexdigest(),
             'runner_python':__import__('sys').version, 'repeats':args.repeats,
             'timeout_seconds':args.timeout_seconds,
             'benchmark_tools_sha256':{p.name:__import__('hashlib').sha256(p.read_bytes()).hexdigest() for p in (repo/'tools/benchmarks').iterdir() if p.suffix in ('.py','.js','.mjs')}}
@@ -69,7 +68,7 @@ try:
           const input=document.createElement('input');input.type='file';input.id='cwa-benchmark-input';document.body.append(input);
         }''')
         adapter = args.workerfs.read_text()
-        meter = (repo / 'tools/benchmarks/workerfs-meter.js').read_text().replace('CWA_CACHE_BYTES', str(args.cache_bytes))
+        meter = (repo / 'tools/benchmarks/workerfs-meter.js').read_text()
         page.evaluate('code => window.cwaExecute(code)', 'import pyjs,numpy as np,pandas as pd,json\npyjs.js.eval(' + repr(adapter) + ')\npyjs.js.eval(' + repr(meter) + ')')
         page.locator('#cwa-benchmark-input').set_input_files(str(args.file.resolve()))
         options = {}

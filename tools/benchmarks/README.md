@@ -1,8 +1,7 @@
 # Native and Xeus reader benchmarks
 
-These tools run against an explicitly installed reader, so the pre-batch wheel and
-new wheel can be compared without rebuilding the old implementation. Keep real
-recordings and full JSON reports outside this repository. Use dataset aliases in
+These tools measure an explicitly installed current reader with configurable
+packet batches. Keep real recordings and full JSON reports outside this repository. Use dataset aliases in
 reports shared with reviewers.
 
 A native invocation runs one case in a fresh Python process:
@@ -12,8 +11,7 @@ A native invocation runs one case in a fresh Python process:
   --case middle --resample-hz 60 --batch-packets 256
 ```
 
-Omit `--batch-packets` when testing the old reader. Cases are `metadata`, `report`,
-`csv-sink`, `early`, `middle` and `late`. Window cases select 60 seconds relative
+Cases are `metadata`, `report`, `csv-sink`, `early`, `middle` and `late`. Window cases select 60 seconds relative
 to the first valid sample. Full-file raw CSV uses `/dev/null`; it includes decoding,
 timestamps and text formatting but never retains a full DataFrame. `report` scans
 packet timing only. They measure different work and must be labelled separately.
@@ -31,23 +29,19 @@ does not modify or package the downstream runtime.
 ```sh
 /path/to/browser-env/bin/python tools/benchmarks/xeus.py /tmp/cwa-wasm \
   /private/recording.cwa /path/to/workerfs.js \
-  --report /tmp/cwa-bench/direct.json --cache-bytes 0 --repeats 3
-/path/to/browser-env/bin/python tools/benchmarks/xeus.py /tmp/cwa-wasm \
-  /private/recording.cwa /path/to/workerfs.js \
-  --report /tmp/cwa-bench/cached.json --cache-bytes 1048576 --repeats 3
+  --report /tmp/cwa-bench/reader.json --repeats 3
 ```
 
 The browser selects a local File and structured-clones its handle through Xeus's
 worker RPC. WORKERFS reads File slices on demand. No full-file `arrayBuffer`,
-base64 conversion or MEMFS staging is used. `--cache-bytes 1048576` enables a single
-shared aligned cache with the downstream bridge's read-ahead algorithm. Logical
-counters measure Rust filesystem calls; physical counters measure
-`FileReaderSync.readAsArrayBuffer` calls and returned bytes. Each case remounts the
-File and clears the cache. Each workload releases its frame and arrays before returning. The kernel stays
+base64 conversion or MEMFS staging is used. Logical counters measure Rust
+filesystem calls; physical counters measure
+`FileReaderSync.readAsArrayBuffer` calls and returned bytes. Each case remounts the File and
+resets counters. Each workload releases its frame and arrays before returning.
+The kernel stays
 alive, including its grown allocator. Local OS file caches are
 not cleared; results are warm-storage measurements, not cold-disk latency.
 The wasm committed heap size is an allocation capacity, not live or peak memory.
-The optional cache is a JavaScript allocation outside that heap.
 
 Use `--cases early,middle,late --resample-hz 60` for resampled windows;
 `--cases csv-sink --repeats 1` for bounded full-file output. Sweep
@@ -57,9 +51,6 @@ A case exceeding `--timeout-seconds` records a bound on the entire kernel
 execution and stops the run. It does not claim a reader-only timing bound.
 Reader time covers only the operation. Metadata and end-to-end time are also
 recorded; end-to-end time includes metadata, conversion and output fingerprinting.
-The old reader collects full resampled CSV output in memory. Benchmark its full
-CSV sink only without resampling; full resampled bounded output requires the new
-batch writer.
 Value hashes are exact checks for raw output; resampling comparisons require the
 separate numeric parity tests and their documented floating-point tolerance.
 
@@ -100,6 +91,5 @@ CARGO_TARGET_DIR=/tmp/cwa-bench/native-core-target cargo build --release --locke
 Use the same packet grid and three fresh process runs per case. Window cases use
 60-second cuts, including their seconds-locator requests. The small boundary metadata
 read used to choose window positions occurs outside timing and counters. Full
-cases include the session header request. Files stay in the warm OS cache. There
-is no equivalent pre-batch bounded decoded-array interface; the old full CSV sink
-and sampling report must be labelled as separate workloads.
+cases include the session header request. Files stay in the warm OS cache. CSV formatting and sampling-report scans are separate workloads and must be
+labelled separately.
