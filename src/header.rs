@@ -1,10 +1,10 @@
 use crate::errors;
-use crate::packet::{cwa_timestamp, packet_meta, read_sector};
+use crate::packet::{cwa_timestamp, packet_meta, read_sector, PacketMeta};
 use chrono::{DateTime, TimeZone, Utc};
 use pyo3::prelude::*;
 use serde::Serialize;
 use std::fs::File;
-use std::io::Read;
+use std::io::{Read, Seek, SeekFrom};
 
 #[derive(Debug, Serialize, Clone)]
 pub struct CwaHeader {
@@ -202,6 +202,71 @@ fn timestamp_us_to_raw_string(timestamp_us: i64) -> Option<String> {
         .map(format_raw_time)
 }
 
+fn sample_bounds_us(meta: &PacketMeta, previous_packet_end: Option<f64>) -> (i64, i64) {
+    let (mut t0, t1) = meta.natural_bounds();
+    if let Some(last_end) = previous_packet_end {
+        if t0 - last_end < 1.0 {
+            t0 = last_end;
+        }
+    }
+    let step = (t1 - t0) / meta.sample_count as f64;
+    (
+        (t0 * 1_000_000.0) as i64,
+        ((t0 + (meta.sample_count - 1) as f64 * step) * 1_000_000.0) as i64,
+    )
+}
+
+/// Locate sample bounds after the caller has validated the CWA header.
+/// Only packets visited from either end are inspected, not the recording's interior.
+fn find_data_bounds(file_path: &str) -> Result<Option<(i64, i64)>, errors::CwaError> {
+    let mut file = File::open(file_path)?;
+    let file_size = file.metadata()?.len();
+    if file_size < 1024 || (file_size - 1024) % 512 != 0 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::UnexpectedEof,
+            "Incomplete CWA sector",
+        )
+        .into());
+    }
+    file.seek(SeekFrom::Start(1024))?;
+    let first = loop {
+        let Some(buffer) = read_sector(&mut file)? else {
+            return Ok(None);
+        };
+        if let Some(meta) = packet_meta(&buffer)? {
+            break meta;
+        }
+    };
+    let first_end_position = file.stream_position()?;
+    let first_sample_us = sample_bounds_us(&first, None).0;
+
+    let mut last = None;
+    let mut position = file_size;
+    while position > first_end_position {
+        position -= 512;
+        file.seek(SeekFrom::Start(position))?;
+        let mut buffer = [0u8; 512];
+        file.read_exact(&mut buffer)?;
+        let Some(meta) = packet_meta(&buffer)? else {
+            continue;
+        };
+        if let Some(last) = last {
+            return Ok(Some((
+                first_sample_us,
+                sample_bounds_us(&last, Some(meta.natural_bounds().1)).1,
+            )));
+        }
+        last = Some(meta);
+    }
+
+    // With two data packets the first is the predecessor; with one, no correction applies.
+    let last_sample_us = match last {
+        Some(last) => sample_bounds_us(&last, Some(first.natural_bounds().1)).1,
+        None => sample_bounds_us(&first, None).1,
+    };
+    Ok(Some((first_sample_us, last_sample_us)))
+}
+
 fn scan_data_timing(file_path: &str) -> Result<DataTimingSummary, errors::CwaError> {
     let mut file = File::open(file_path)?;
 
@@ -220,24 +285,12 @@ fn scan_data_timing(file_path: &str) -> Result<DataTimingSummary, errors::CwaErr
         let Some(meta) = packet_meta(&buffer)? else {
             continue;
         };
-        let (natural_t0, natural_t1) = meta.natural_bounds();
-        let sample_count = meta.sample_count;
-
-        let mut t0 = natural_t0;
-        if let Some(last_end) = previous_packet_end {
-            if t0 - last_end < 1.0 {
-                t0 = last_end;
-            }
-        }
-
-        let step = (natural_t1 - t0) / sample_count as f64;
-        let packet_first_us = (t0 * 1_000_000.0) as i64;
-        let packet_last_us = ((t0 + (sample_count - 1) as f64 * step) * 1_000_000.0) as i64;
+        let (packet_first_us, packet_last_us) = sample_bounds_us(&meta, previous_packet_end);
 
         first_sample_us.get_or_insert(packet_first_us);
         last_sample_us = Some(packet_last_us);
-        sample_count_total += sample_count as u64;
-        previous_packet_end = Some(natural_t1);
+        sample_count_total += meta.sample_count as u64;
+        previous_packet_end = Some(meta.natural_bounds().1);
     }
 
     Ok(DataTimingSummary {
@@ -329,7 +382,7 @@ pub fn sampling_consistency_report(py: Python, file_path: &str) -> PyResult<Py<P
 }
 
 /// Read CWA header and sample timing metadata without timezone conversion.
-/// Scans packet metadata without decoding sensor values.
+/// Searches from both ends for sample bounds without decoding sensor values.
 /// `logging_start_time_raw`, `logging_end_time_raw`, and `last_change_time_raw`
 /// are naive ISO 8601 strings preserving the unaltered sensor clock values,
 /// or None when unset. Convert them to UTC or local time for most analysis.
@@ -342,7 +395,7 @@ pub fn sampling_consistency_report(py: Python, file_path: &str) -> PyResult<Py<P
 pub fn read_metadata(py: Python, file_path: &str) -> PyResult<Py<PyAny>> {
     match read_cwa_header(file_path) {
         Ok(header) => {
-            let data = scan_data_timing(file_path)
+            let bounds = find_data_bounds(file_path)
                 .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
             let header_dict = pyo3::types::PyDict::new(py);
 
@@ -369,11 +422,11 @@ pub fn read_metadata(py: Python, file_path: &str) -> PyResult<Py<PyAny>> {
             )?;
             header_dict.set_item(
                 "start_from_data_raw",
-                data.first_sample_us.and_then(timestamp_us_to_raw_string),
+                bounds.and_then(|(first, _)| timestamp_us_to_raw_string(first)),
             )?;
             header_dict.set_item(
                 "end_from_data_raw",
-                data.last_sample_us.and_then(timestamp_us_to_raw_string),
+                bounds.and_then(|(_, last)| timestamp_us_to_raw_string(last)),
             )?;
 
             // Device configuration

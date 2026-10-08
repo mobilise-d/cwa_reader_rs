@@ -214,7 +214,7 @@ which can arrive after the configured `logging_start_local`. The header contains
 the scheduled start, not the measured first-sample time, and that scheduled value
 can be unset. Header information alone therefore does not determine the exact
 origin of a seconds cut. `read_metadata` also provides `start_from_data_raw` and
-`end_from_data_raw` by scanning packet metadata without decoding sample values.
+`end_from_data_raw` by searching packet metadata from both ends without decoding sample values.
 Use those measured timestamps to choose cuts without first loading all samples.
 
 Depending on your application, you may want to start 24-hour bouts at the
@@ -307,7 +307,7 @@ first_sample_raw = metadata["start_from_data_raw"]
 last_sample_raw = metadata["end_from_data_raw"]
 ```
 
-The metadata read parses the 1024-byte CWA header and scans packet metadata without decoding sensor values. It includes device and session identifiers (`hardware_type`, `device_id`, `session_id`), recording timing fields (`logging_start_time_raw`, `logging_end_time_raw`, `last_change_time_raw`), nominal sensor configuration (`sample_rate_hz`, `accel_range`, `gyro_range`, `magnetometer_enabled`, `firmware_revision`), and the free-form `annotation`. It also returns the first and last actual sample timestamps as `start_from_data_raw` and `end_from_data_raw`, including packet sample offsets and continuity correction. These can differ from the configured logging start/end and are `None` when no samples exist.
+The metadata read parses the 1024-byte CWA header, searches forward for the first data packet, and searches backward for the last data packet and its preceding data packet. It skips non-data and empty packets and does not decode sensor values or scan the recording interior. Errors in unvisited interior packets are not detected by this lookup; `sampling_consistency_report` still scans all packet metadata. It includes device and session identifiers (`hardware_type`, `device_id`, `session_id`), recording timing fields (`logging_start_time_raw`, `logging_end_time_raw`, `last_change_time_raw`), nominal sensor configuration (`sample_rate_hz`, `accel_range`, `gyro_range`, `magnetometer_enabled`, `firmware_revision`), and the free-form `annotation`. It also returns the first and last actual sample timestamps as `start_from_data_raw` and `end_from_data_raw`, including packet sample offsets and continuity correction. These can differ from the configured logging start/end and are `None` when no samples exist.
 
 The `_raw` time fields are timezone-naive ISO 8601 strings when present, or `None`
 when unset. They decode the unaltered time values recorded by the sensor, without
