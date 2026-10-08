@@ -5,7 +5,7 @@ use csv::WriterBuilder;
 use std::collections::VecDeque;
 use std::fmt::Write as _;
 use std::fs::File;
-use std::io::{BufWriter, Read, Seek, SeekFrom};
+use std::io::{BufWriter, Read, Seek, SeekFrom, Write};
 
 const MAX_RESAMPLE_HZ: f64 = 10_000.0;
 
@@ -197,16 +197,6 @@ fn resolve_block_range(
     Ok((start_block, end_block))
 }
 
-fn open_cwa_data_blocks(
-    file_path: &str,
-    start_block: Option<usize>,
-    num_blocks: Option<usize>,
-) -> Result<(File, usize, usize, Option<f64>), CwaError> {
-    let mut file = File::open(file_path)?;
-    let (start, end, previous) = prepare_cwa_data_blocks(&mut file, start_block, num_blocks)?;
-    Ok((file, start, end, previous))
-}
-
 fn prepare_cwa_data_blocks<R: Read + Seek>(
     file: &mut R,
     start_block: Option<usize>,
@@ -251,7 +241,9 @@ pub fn resolve_read_plan(file_path: &str, cut: CutConfig) -> Result<ReadPlan, Cw
                 },
             })
         }
-        CutConfig::Seconds { start, end } => resolve_seconds_read_plan(file_path, start, end),
+        CutConfig::Seconds { start, end } => {
+            resolve_seconds_read_plan(&mut File::open(file_path)?, start, end)
+        }
     }
 }
 
@@ -262,20 +254,19 @@ struct BlockTimeSpan {
     end_seconds: f64,
 }
 
-fn resolve_seconds_read_plan(
-    file_path: &str,
+fn resolve_seconds_read_plan<R: Read + Seek>(
+    mut file: &mut R,
     start_seconds: Option<f64>,
     end_seconds: Option<f64>,
 ) -> Result<ReadPlan, CwaError> {
-    let mut file = File::open(file_path)?;
-
+    file.seek(SeekFrom::Start(0))?;
     let mut header = [0u8; 2];
     file.read_exact(&mut header)?;
     if header != *b"MD" {
         return Err("Not a valid CWA file".into());
     }
 
-    let file_size = file.metadata()?.len();
+    let file_size = file.seek(SeekFrom::End(0))?;
     let (start_block, end_block) = resolve_block_range(file_size, None, None)?;
     file.seek(SeekFrom::Start(data_block_offset(start_block as u64)?))?;
 
@@ -1341,9 +1332,26 @@ pub fn read_cwa_data_resampled_streaming(
     resample_options: ResampleOptions,
     cut_range: TimeRangeOptions,
 ) -> Result<CwaDataResult, CwaError> {
-    let (mut file, start_block, end_block, initial_previous_packet_end) =
-        open_cwa_data_blocks(file_path, start_block, num_blocks)?;
+    read_cwa_data_resampled_from_reader(
+        &mut File::open(file_path)?,
+        start_block,
+        num_blocks,
+        parse_options,
+        resample_options,
+        cut_range,
+    )
+}
 
+pub(crate) fn read_cwa_data_resampled_from_reader<R: Read + Seek>(
+    mut file: &mut R,
+    start_block: Option<usize>,
+    num_blocks: Option<usize>,
+    parse_options: CwaParsingOptions,
+    resample_options: ResampleOptions,
+    cut_range: TimeRangeOptions,
+) -> Result<CwaDataResult, CwaError> {
+    let (start_block, end_block, initial_previous_packet_end) =
+        prepare_cwa_data_blocks(file, start_block, num_blocks)?;
     let mut previous_packet_end: Option<f64> = initial_previous_packet_end;
     let mut resampler: Option<StreamingResampler> = None;
     let resample_range = cut_range;
@@ -1685,18 +1693,16 @@ fn write_csv_row<W: std::io::Write>(
     Ok(())
 }
 
-fn write_data_result_csv(
-    output_path: &str,
+fn write_data_result_csv<W: Write>(
+    output: W,
     data: &CwaDataResult,
     options: &CwaParsingOptions,
     offset_us: i64,
 ) -> Result<(), CwaError> {
-    let output_file = File::create(output_path)?;
-    let output_buffer = BufWriter::with_capacity(16 * 1024 * 1024, output_file);
     let mut writer = WriterBuilder::new()
         .has_headers(false)
         .quote_style(csv::QuoteStyle::Never)
-        .from_writer(output_buffer);
+        .from_writer(output);
 
     let channels = data.sensor_channels();
     let header = csv_header(options, channels);
@@ -1736,8 +1742,8 @@ fn write_data_result_csv(
     Ok(())
 }
 
-fn scan_sensor_channels(
-    file: &mut File,
+fn scan_sensor_channels<R: Read + Seek>(
+    file: &mut R,
     start_block: usize,
     end_block: usize,
     options: &CwaParsingOptions,
@@ -1766,37 +1772,69 @@ pub fn write_cwa_csv_data(
     time_range: TimeRangeOptions,
     offset_us: i64,
 ) -> Result<(), CwaError> {
+    write_cwa_csv_from_reader(
+        &mut File::open(file_path)?,
+        || {
+            Ok(BufWriter::with_capacity(
+                16 * 1024 * 1024,
+                File::create(output_path)?,
+            ))
+        },
+        start_block,
+        num_blocks,
+        options,
+        resample_options,
+        time_range,
+        offset_us,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn write_cwa_csv_from_reader<R, W, F>(
+    mut file: &mut R,
+    create_output: F,
+    start_block: Option<usize>,
+    num_blocks: Option<usize>,
+    options: CwaParsingOptions,
+    resample_options: Option<ResampleOptions>,
+    time_range: TimeRangeOptions,
+    offset_us: i64,
+) -> Result<(), CwaError>
+where
+    R: Read + Seek,
+    W: Write,
+    F: FnOnce() -> Result<W, CwaError>,
+{
     time_range.validate()?;
 
     if let Some(resample) = resample_options {
-        let data = read_cwa_data_resampled_streaming(
-            file_path,
+        let data = read_cwa_data_resampled_from_reader(
+            file,
             start_block,
             num_blocks,
             options.clone(),
             resample,
             time_range,
         )?;
-        return write_data_result_csv(output_path, &data, &options, offset_us);
+        return write_data_result_csv(create_output()?, &data, &options, offset_us);
     }
 
     if time_range.has_bounds() {
-        let data = read_cwa_data(file_path, start_block, num_blocks, Some(options.clone()))?;
+        let data = read_cwa_data_from_reader(file, start_block, num_blocks, Some(options.clone()))?;
         let data = filter_data_by_time_range(data, time_range)?;
-        return write_data_result_csv(output_path, &data, &options, offset_us);
+        return write_data_result_csv(create_output()?, &data, &options, offset_us);
     }
 
-    let (mut file, start_block, end_block, initial_previous_packet_end) =
-        open_cwa_data_blocks(file_path, start_block, num_blocks)?;
+    let (start_block, end_block, initial_previous_packet_end) =
+        prepare_cwa_data_blocks(file, start_block, num_blocks)?;
 
     let channels = scan_sensor_channels(&mut file, start_block, end_block, &options)?;
 
-    let output_file = File::create(output_path)?;
-    let output_buffer = BufWriter::with_capacity(16 * 1024 * 1024, output_file);
+    let output = create_output()?;
     let mut writer = WriterBuilder::new()
         .has_headers(false)
         .quote_style(csv::QuoteStyle::Never)
-        .from_writer(output_buffer);
+        .from_writer(output);
 
     let header = csv_header(&options, channels);
     writer.write_record(&header)?;
