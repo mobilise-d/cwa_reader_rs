@@ -1,10 +1,10 @@
 # Packet-batched reader
 
-Status: implementation, user-requested simplicity/performance follow-up. Base a686c45c4f362ed73aa404d16799e0cd2bf9cf98.
+Status: complete, including the requested simplicity/performance follow-up and direct File metadata. Base a686c45c4f362ed73aa404d16799e0cd2bf9cf98.
 PR https://github.com/mobilise-d/cwa_reader_rs/pull/7 remains the delivery PR.
 All previously reviewed history is immutable; use normal new commits.
 
-COMPACTION CONTINUITY: Re-read implement-code-change and the task-defining artifacts before continuing after compaction or session restoration.
+The entries below preserve implementation history. Final acceptance is recorded at the end.
 
 ## Accepted design
 
@@ -276,3 +276,15 @@ outputs match native. The benchmark guide retains older five-size sweeps with
 explicit source labels and records these final optimized default measurements.
 All code and packaging criteria are satisfied. The new-scope final range review,
 its potential corrections and final PR delivery remain outstanding.
+
+
+## Final acceptance
+
+Follow-up final review14275 covered d02990412f2185adcd60fb8f85ec6996b9c5c171
+through08dba523650b26b58c81bee17dfea7efad89348a and passed without findings.
+It is closed. Original review14240 and every implementation/correction review
+are also closed. No history was rewritten and no follow-up correction was needed.
+All acceptance gates above are satisfied, including native packaging, actual
+Xeus and standalone browser tests, verified CI artifacts, targeted File metadata,
+all five simplifications, exact native comparisons and refreshed measurements.
+PR7 contains the final source and documentation; no merge or publication occurred.
