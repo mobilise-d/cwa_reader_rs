@@ -1,11 +1,9 @@
 use crate::errors::CwaError;
-use crate::packet::{cwa_timestamp, packet_meta, read_sector, PacketMeta};
+use crate::packet::{cwa_timestamp, packet_meta, PacketMeta};
 use chrono::{DateTime, Utc};
 use csv::WriterBuilder;
 use std::collections::VecDeque;
 use std::fmt::Write as _;
-use std::fs::File;
-use std::io::{Read, Seek, SeekFrom, Write};
 
 const MAX_RESAMPLE_HZ: f64 = 10_000.0;
 
@@ -26,36 +24,6 @@ impl Default for CwaParsingOptions {
             include_light: true,
             include_battery: true,
         }
-    }
-}
-
-#[derive(Debug, Clone, Copy)]
-pub(crate) struct TimeRangeOptions {
-    pub start_time_seconds: Option<f64>,
-    pub end_time_seconds: Option<f64>,
-}
-
-impl TimeRangeOptions {
-    fn has_bounds(&self) -> bool {
-        self.start_time_seconds.is_some() || self.end_time_seconds.is_some()
-    }
-
-    pub fn validate(&self) -> Result<(), CwaError> {
-        for value in [self.start_time_seconds, self.end_time_seconds]
-            .into_iter()
-            .flatten()
-        {
-            if !value.is_finite() {
-                return Err("time range values must be finite".into());
-            }
-        }
-
-        if let (Some(start), Some(end)) = (self.start_time_seconds, self.end_time_seconds) {
-            if end <= start {
-                return Err("range_end_time must be greater than range_start_time".into());
-            }
-        }
-        Ok(())
     }
 }
 
@@ -106,13 +74,6 @@ impl CutConfig {
 }
 
 #[derive(Debug, Clone, Copy)]
-pub(crate) struct ReadPlan {
-    pub start_block: Option<usize>,
-    pub num_blocks: Option<usize>,
-    pub time_range: TimeRangeOptions,
-}
-
-#[derive(Debug, Clone, Copy)]
 pub struct ResampleOptions {
     target_hz: f64,
 }
@@ -134,7 +95,7 @@ impl ResampleOptions {
 }
 
 // File offsets remain 64-bit even when the target's pointers are 32-bit.
-fn data_block_offset(block_index: u64) -> Result<u64, CwaError> {
+pub(crate) fn data_block_offset(block_index: u64) -> Result<u64, CwaError> {
     block_index
         .checked_mul(512)
         .and_then(|offset| offset.checked_add(1024))
@@ -172,7 +133,7 @@ fn reserve_column<T>(column: &mut Vec<T>, additional: usize) -> Result<(), CwaEr
     reservation.map_err(|e| format!("Cannot allocate CWA sample column: {e}").into())
 }
 
-fn resolve_block_range(
+pub(crate) fn resolve_block_range(
     file_size: u64,
     start_block: Option<usize>,
     num_blocks: Option<usize>,
@@ -195,145 +156,6 @@ fn resolve_block_range(
     let num_blocks = num_blocks.unwrap_or(total_blocks - start_block);
     let end_block = std::cmp::min(start_block.saturating_add(num_blocks), total_blocks);
     Ok((start_block, end_block))
-}
-
-fn prepare_cwa_data_blocks<R: Read + Seek>(
-    file: &mut R,
-    start_block: Option<usize>,
-    num_blocks: Option<usize>,
-) -> Result<(usize, usize, Option<f64>), CwaError> {
-    file.seek(SeekFrom::Start(0))?;
-    let mut header = [0u8; 2];
-    file.read_exact(&mut header)?;
-    if header != *b"MD" {
-        return Err("Not a valid CWA file".into());
-    }
-    let file_size = file.seek(SeekFrom::End(0))?;
-    let (start_block, end_block) = resolve_block_range(file_size, start_block, num_blocks)?;
-    let previous_packet_end = find_previous_packet_end(file, start_block)?;
-    file.seek(SeekFrom::Start(data_block_offset(start_block as u64)?))?;
-    Ok((start_block, end_block, previous_packet_end))
-}
-
-fn cut_to_block_range(cut: CutConfig) -> Result<(Option<usize>, Option<usize>), CwaError> {
-    match cut {
-        CutConfig::Full => Ok((None, None)),
-        CutConfig::Blocks { start, end } => {
-            let start_block = start.unwrap_or(0);
-            let num_blocks = end.map(|end| end - start_block);
-            Ok((Some(start_block), num_blocks))
-        }
-        CutConfig::Seconds { .. } => Err("seconds cut must be resolved with file metadata".into()),
-    }
-}
-
-fn resolve_block_read_plan(cut: CutConfig) -> Result<ReadPlan, CwaError> {
-    let (start_block, num_blocks) = cut_to_block_range(cut)?;
-    Ok(ReadPlan {
-        start_block,
-        num_blocks,
-        time_range: TimeRangeOptions {
-            start_time_seconds: None,
-            end_time_seconds: None,
-        },
-    })
-}
-
-pub(crate) fn resolve_read_plan_from_reader<R: Read + Seek>(
-    reader: &mut R,
-    cut: CutConfig,
-) -> Result<ReadPlan, CwaError> {
-    cut.validate()?;
-    match cut {
-        CutConfig::Seconds { start, end } => resolve_seconds_read_plan(reader, start, end),
-        _ => resolve_block_read_plan(cut),
-    }
-}
-
-#[derive(Debug, Clone, Copy)]
-struct BlockTimeSpan {
-    index: usize,
-    start_seconds: f64,
-    end_seconds: f64,
-}
-
-fn resolve_seconds_read_plan<R: Read + Seek>(
-    mut file: &mut R,
-    start_seconds: Option<f64>,
-    end_seconds: Option<f64>,
-) -> Result<ReadPlan, CwaError> {
-    file.seek(SeekFrom::Start(0))?;
-    let mut header = [0u8; 2];
-    file.read_exact(&mut header)?;
-    if header != *b"MD" {
-        return Err("Not a valid CWA file".into());
-    }
-
-    let file_size = file.seek(SeekFrom::End(0))?;
-    let (start_block, end_block) = resolve_block_range(file_size, None, None)?;
-    file.seek(SeekFrom::Start(data_block_offset(start_block as u64)?))?;
-
-    let mut spans = Vec::new();
-    let mut previous_packet_end = None;
-    let mut first_sample_time = None;
-    for block_index in start_block..end_block {
-        let buffer = read_sector(&mut file)?.ok_or("Unexpected end of CWA data")?;
-        let Some(meta) = packet_meta(&buffer)? else {
-            continue;
-        };
-
-        let (natural_start, natural_end) = meta.natural_bounds();
-        let mut adjusted_start = natural_start;
-        if let Some(last_end) = previous_packet_end {
-            if adjusted_start - last_end < 1.0 {
-                adjusted_start = last_end;
-            }
-        }
-        previous_packet_end = Some(natural_end);
-        first_sample_time.get_or_insert(adjusted_start);
-        spans
-            .try_reserve(1)
-            .map_err(|e| format!("Cannot allocate CWA block time spans: {e}"))?;
-        spans.push(BlockTimeSpan {
-            index: block_index,
-            start_seconds: adjusted_start,
-            end_seconds: natural_end,
-        });
-    }
-
-    let origin = first_sample_time.ok_or("No valid sample data found")?;
-    let absolute_start = start_seconds.map(|start| origin + start);
-    let absolute_end = end_seconds.map(|end| origin + end);
-
-    let mut first_idx = None;
-    let mut last_idx = None;
-    for (span_idx, span) in spans.iter().enumerate() {
-        if absolute_start.is_some_and(|start| span.end_seconds <= start) {
-            continue;
-        }
-        if absolute_end.is_some_and(|end| span.start_seconds >= end) {
-            break;
-        }
-        first_idx.get_or_insert(span_idx);
-        last_idx = Some(span_idx);
-    }
-
-    let first_idx = first_idx.ok_or("No samples remain after applying seconds cut")?;
-    let last_idx = last_idx.expect("last index exists when first index exists");
-    let padded_first_idx = first_idx.saturating_sub(1);
-    let padded_last_idx = std::cmp::min(last_idx + 1, spans.len() - 1);
-
-    let start_block = spans[padded_first_idx].index;
-    let end_block = spans[padded_last_idx].index + 1;
-
-    Ok(ReadPlan {
-        start_block: Some(start_block),
-        num_blocks: Some(end_block - start_block),
-        time_range: TimeRangeOptions {
-            start_time_seconds: absolute_start,
-            end_time_seconds: absolute_end,
-        },
-    })
 }
 
 /// CWA Data Block structure (512 bytes)
@@ -783,6 +605,275 @@ pub struct CwaDataResult {
     pub battery_levels: Option<Vec<f32>>,
 }
 
+pub(crate) fn empty_result(options: &CwaParsingOptions) -> CwaDataResult {
+    CwaDataResult {
+        timestamps: Vec::new(),
+        acc_x: Vec::new(),
+        acc_y: Vec::new(),
+        acc_z: Vec::new(),
+        gyro_x: None,
+        gyro_y: None,
+        gyro_z: None,
+        mag_x: None,
+        mag_y: None,
+        mag_z: None,
+        temperatures: options.include_temperature.then(Vec::new),
+        light_values: options.include_light.then(Vec::new),
+        battery_levels: options.include_battery.then(Vec::new),
+    }
+}
+
+pub(crate) fn decode_loaded_batch(
+    plan: &crate::batch::BatchDescriptor,
+    bytes: &[u8],
+) -> Result<crate::batch::BatchResult, CwaError> {
+    if bytes.len()
+        != plan
+            .loaded_packets
+            .len()
+            .checked_mul(512)
+            .ok_or("CWA batch byte count overflow")?
+    {
+        return Err("Incomplete preloaded CWA batch".into());
+    }
+    let options = &plan.options.channels;
+    let mut source = Vec::new();
+    let mut previous_end = plan.previous_packet_end;
+    let mut origin = plan.recording_origin_seconds;
+    let mut first_domain = plan.first_domain_sample_us;
+    let mut owned_first = None;
+    let mut owned_end = None;
+    let mut observed = SensorChannels::default();
+    for (index, packet) in bytes.chunks_exact(512).enumerate() {
+        let index = plan.loaded_packets.start + index;
+        if index >= plan.selected_packets.end {
+            break;
+        }
+        let buffer: &[u8; 512] = packet.try_into().expect("complete packet");
+        let Some(meta) = packet_meta(buffer)? else {
+            continue;
+        };
+        if index < plan.selected_packets.start {
+            previous_end = Some(meta.natural_bounds().1);
+            continue;
+        }
+        let block = CwaDataBlock::from_buffer(buffer)?;
+        let samples = block.parse_samples(options)?;
+        let (timestamps, end) =
+            calculate_sample_timestamps_with_prev_end(&block, samples.len(), previous_end)?;
+        previous_end = Some(end);
+        if index < plan.selected_packets.start {
+            continue;
+        }
+        origin.get_or_insert(timestamps[0] as f64 / 1_000_000.0);
+        first_domain.get_or_insert(timestamps[0]);
+        if plan.owned_packets.contains(&index) {
+            owned_first.get_or_insert(timestamps[0] as f64 / 1_000_000.0);
+        }
+        if index >= plan.owned_packets.end {
+            owned_end.get_or_insert(timestamps[0] as f64 / 1_000_000.0);
+        }
+        for (timestamp, sample) in timestamps.into_iter().zip(samples) {
+            let time_seconds = timestamp as f64 / 1_000_000.0;
+            if plan.owned_packets.contains(&index)
+                && in_batch_time_range(plan, origin, time_seconds)
+            {
+                observed.gyro |= sample.gyro_x.is_some();
+                observed.magnetometer |= sample.mag_x.is_some();
+            }
+            reserve_column(&mut source, 1)?;
+            source.push((
+                index,
+                timestamp,
+                TimedSample {
+                    time_seconds,
+                    sample,
+                    temperature: block.get_temperature_celsius(),
+                    light: block.get_light_calibrated(),
+                    battery: block.get_battery_voltage(),
+                },
+            ));
+        }
+    }
+    let mut grid_origin = plan.grid_origin_seconds;
+    let mut result = empty_result(options);
+    if let Some(resample) = plan.options.resample {
+        if let Some((_, _, first)) = source.first() {
+            let start = match plan.options.cut {
+                CutConfig::Seconds {
+                    start: Some(start), ..
+                } => first
+                    .time_seconds
+                    .max(origin.expect("source origin") + start),
+                _ => first.time_seconds,
+            };
+            let anchor = *grid_origin.get_or_insert(start);
+            if let Some(lower) = owned_first {
+                let step_ms = 1000.0 / resample.target_hz;
+                let target_start_ms = anchor * 1000.0;
+                let lower = match plan.options.cut {
+                    CutConfig::Seconds {
+                        start: Some(start), ..
+                    } => lower.max(origin.expect("source origin") + start),
+                    _ => lower,
+                };
+                let mut target_index = (((lower * 1000.0 - target_start_ms) / step_ms)
+                    .floor()
+                    .max(0.0)) as u64;
+                let target_time = |index: u64| (target_start_ms + index as f64 * step_ms) / 1000.0;
+                while target_time(target_index) < lower {
+                    target_index = target_index
+                        .checked_add(1)
+                        .ok_or("CWA resampling target counter overflow")?;
+                }
+                let last_time = source.last().expect("source present").2.time_seconds;
+                let domain_end = plan.loaded_packets.end >= plan.selected_packets.end;
+                if owned_end.is_none()
+                    && !domain_end
+                    && in_batch_time_range(plan, origin, target_time(target_index))
+                {
+                    return Err(plan.insufficient(
+                        crate::errors::ContextSide::Right,
+                        "next ownership boundary is outside the loaded packets",
+                    ));
+                }
+                let mut interpolator = LoadedInterpolator {
+                    samples: source.iter().map(|(_, _, sample)| sample.clone()).collect(),
+                    acc_left: 0,
+                    result: empty_result(options),
+                };
+                loop {
+                    let target = target_time(target_index);
+                    if owned_end.is_some_and(|end| target >= end)
+                        || !in_batch_time_range(plan, origin, target)
+                    {
+                        break;
+                    }
+                    if target > last_time {
+                        if domain_end {
+                            break;
+                        }
+                        return Err(plan.insufficient(
+                            crate::errors::ContextSide::Right,
+                            "target bracket is outside the loaded packets",
+                        ));
+                    }
+                    interpolator.acc_left =
+                        interpolator.advance_left(interpolator.acc_left, target);
+                    let left = interpolator.acc_left;
+                    if !interpolator.has_bracket(left, target) {
+                        break;
+                    }
+                    if left == 0
+                        && first_domain != source.first().map(|(_, timestamp, _)| *timestamp)
+                    {
+                        return Err(plan.insufficient(
+                            crate::errors::ContextSide::Left,
+                            "four original samples require more left context",
+                        ));
+                    }
+                    if left + 2 >= interpolator.samples.len() && !domain_end {
+                        return Err(plan.insufficient(
+                            crate::errors::ContextSide::Right,
+                            "four original samples require more right context",
+                        ));
+                    }
+                    interpolator.emit_one(target)?;
+                    target_index = target_index
+                        .checked_add(1)
+                        .ok_or("CWA resampling target counter overflow")?;
+                }
+                result = interpolator.result;
+                for (column, present) in [
+                    (&mut result.gyro_x, observed.gyro),
+                    (&mut result.gyro_y, observed.gyro),
+                    (&mut result.gyro_z, observed.gyro),
+                    (&mut result.mag_x, observed.magnetometer),
+                    (&mut result.mag_y, observed.magnetometer),
+                    (&mut result.mag_z, observed.magnetometer),
+                ] {
+                    if present {
+                        ensure_sensor_column(column, result.timestamps.len())?;
+                    }
+                }
+            }
+        }
+    } else {
+        for (index, timestamp, sample) in source {
+            if plan.owned_packets.contains(&index)
+                && in_batch_time_range(plan, origin, sample.time_seconds)
+            {
+                append_original_sample(&mut result, timestamp, &sample)?;
+            }
+        }
+    }
+    if let Some(offset) = plan.options.fixed_utc_offset_us {
+        for timestamp in &mut result.timestamps {
+            *timestamp = timestamp
+                .checked_sub(offset)
+                .ok_or("Timestamp overflow after fixed UTC offset")?;
+        }
+    }
+    Ok(crate::batch::BatchResult {
+        data: result,
+        recording_origin_seconds: origin,
+        grid_origin_seconds: grid_origin,
+        first_domain_sample_us: first_domain,
+    })
+}
+
+fn in_batch_time_range(
+    plan: &crate::batch::BatchDescriptor,
+    origin: Option<f64>,
+    time: f64,
+) -> bool {
+    match plan.options.cut {
+        CutConfig::Seconds { start, end } => {
+            let origin = origin.expect("source origin");
+            !start.is_some_and(|s| time < origin + s) && !end.is_some_and(|e| time >= origin + e)
+        }
+        _ => true,
+    }
+}
+
+fn append_original_sample(
+    result: &mut CwaDataResult,
+    timestamp: i64,
+    sample: &TimedSample,
+) -> Result<(), CwaError> {
+    checked_sample_count(result.timestamps.len(), 1)?;
+    reserve_column(&mut result.timestamps, 1)?;
+    for column in [&mut result.acc_x, &mut result.acc_y, &mut result.acc_z] {
+        reserve_column(column, 1)?;
+    }
+    result.timestamps.push(timestamp);
+    result.acc_x.push(sample.sample.acc_x);
+    result.acc_y.push(sample.sample.acc_y);
+    result.acc_z.push(sample.sample.acc_z);
+    let previous_len = result.timestamps.len() - 1;
+    for (column, value) in [
+        (&mut result.gyro_x, sample.sample.gyro_x),
+        (&mut result.gyro_y, sample.sample.gyro_y),
+        (&mut result.gyro_z, sample.sample.gyro_z),
+        (&mut result.mag_x, sample.sample.mag_x),
+        (&mut result.mag_y, sample.sample.mag_y),
+        (&mut result.mag_z, sample.sample.mag_z),
+    ] {
+        append_sensor_value(column, value, previous_len)?;
+    }
+    for (column, value) in [
+        (&mut result.temperatures, sample.temperature),
+        (&mut result.light_values, sample.light),
+        (&mut result.battery_levels, sample.battery),
+    ] {
+        if let Some(values) = column {
+            reserve_column(values, 1)?;
+            values.push(value);
+        }
+    }
+    Ok(())
+}
+
 /// Allocate a sensor column only once the sensor occurs in a sample.
 /// Missing samples in a present channel are NaN, never fabricated zeroes.
 fn ensure_sensor_column(
@@ -814,13 +905,13 @@ fn append_sensor_value(
 }
 
 #[derive(Clone, Copy, Default)]
-struct SensorChannels {
-    gyro: bool,
-    magnetometer: bool,
+pub(crate) struct SensorChannels {
+    pub(crate) gyro: bool,
+    pub(crate) magnetometer: bool,
 }
 
 impl CwaDataResult {
-    fn sensor_channels(&self) -> SensorChannels {
+    pub(crate) fn sensor_channels(&self) -> SensorChannels {
         SensorChannels {
             gyro: self.gyro_x.is_some(),
             magnetometer: self.mag_x.is_some(),
@@ -854,175 +945,12 @@ struct TimedSample {
     battery: f32,
 }
 
-struct StreamingResampler {
-    options: ResampleOptions,
-    range: TimeRangeOptions,
+struct LoadedInterpolator {
     samples: VecDeque<TimedSample>,
     acc_left: usize,
-    target_start_ms: Option<f64>,
-    next_target_index: u64,
-    done: bool,
     result: CwaDataResult,
 }
-
-impl StreamingResampler {
-    fn new(
-        parse_options: &CwaParsingOptions,
-        options: ResampleOptions,
-        range: TimeRangeOptions,
-    ) -> Result<Self, CwaError> {
-        range.validate()?;
-
-        Ok(Self {
-            options,
-            range,
-            samples: VecDeque::new(),
-            acc_left: 0,
-            target_start_ms: None,
-            next_target_index: 0,
-            done: false,
-            result: CwaDataResult {
-                timestamps: Vec::new(),
-                acc_x: Vec::new(),
-                acc_y: Vec::new(),
-                acc_z: Vec::new(),
-                gyro_x: None,
-                gyro_y: None,
-                gyro_z: None,
-                mag_x: None,
-                mag_y: None,
-                mag_z: None,
-                temperatures: if parse_options.include_temperature {
-                    Some(Vec::new())
-                } else {
-                    None
-                },
-                light_values: if parse_options.include_light {
-                    Some(Vec::new())
-                } else {
-                    None
-                },
-                battery_levels: if parse_options.include_battery {
-                    Some(Vec::new())
-                } else {
-                    None
-                },
-            },
-        })
-    }
-
-    fn is_done(&self) -> bool {
-        self.done
-    }
-
-    fn into_result(mut self) -> Result<CwaDataResult, CwaError> {
-        self.emit_ready(true)?;
-        if self.result.timestamps.is_empty() {
-            return Err("No samples remain after applying time range/resampling".into());
-        }
-        Ok(self.result)
-    }
-
-    fn push_sample(
-        &mut self,
-        time_seconds: f64,
-        sample: &SampleData,
-        temperature: f32,
-        light: f32,
-        battery: f32,
-    ) -> Result<(), CwaError> {
-        // Presence follows selected source samples, even when a short sensor
-        // segment falls between every timestamp on the output grid.
-        let in_range = !self
-            .range
-            .start_time_seconds
-            .is_some_and(|start| time_seconds < start)
-            && !self
-                .range
-                .end_time_seconds
-                .is_some_and(|end| time_seconds >= end);
-        if in_range {
-            let output_len = self.result.timestamps.len();
-            for (column, value) in [
-                (&mut self.result.gyro_x, sample.gyro_x),
-                (&mut self.result.gyro_y, sample.gyro_y),
-                (&mut self.result.gyro_z, sample.gyro_z),
-                (&mut self.result.mag_x, sample.mag_x),
-                (&mut self.result.mag_y, sample.mag_y),
-                (&mut self.result.mag_z, sample.mag_z),
-            ] {
-                if value.is_some() {
-                    ensure_sensor_column(column, output_len)?;
-                }
-            }
-        }
-
-        if self.done {
-            return Ok(());
-        }
-
-        self.samples
-            .try_reserve(1)
-            .map_err(|e| format!("Cannot allocate CWA resampling buffer: {e}"))?;
-        self.samples.push_back(TimedSample {
-            time_seconds,
-            sample: sample.clone(),
-            temperature,
-            light,
-            battery,
-        });
-
-        if self.target_start_ms.is_none() {
-            let mut start = time_seconds;
-            if let Some(range_start) = self.range.start_time_seconds {
-                if range_start > start {
-                    start = range_start;
-                }
-            }
-            self.target_start_ms = Some(start * 1000.0);
-            self.next_target_index = 0;
-        }
-
-        self.emit_ready(false)
-    }
-
-    fn emit_ready(&mut self, final_flush: bool) -> Result<(), CwaError> {
-        let Some(target_start_ms) = self.target_start_ms else {
-            return Ok(());
-        };
-        let step_ms = 1000.0 / self.options.target_hz;
-
-        loop {
-            let target_time = (target_start_ms + self.next_target_index as f64 * step_ms) / 1000.0;
-            if self
-                .range
-                .end_time_seconds
-                .is_some_and(|end| target_time >= end)
-            {
-                self.done = true;
-                break;
-            }
-
-            self.acc_left = self.advance_left(self.acc_left, target_time);
-            if !self.has_bracket(self.acc_left, target_time) {
-                self.prune();
-                break;
-            }
-            if !self.has_cubic_lookahead(self.acc_left, final_flush) {
-                self.prune();
-                break;
-            }
-
-            self.emit_one(target_time)?;
-            self.next_target_index = self
-                .next_target_index
-                .checked_add(1)
-                .ok_or("CWA resampling target counter overflow")?;
-            self.prune();
-        }
-        Ok(())
-    }
-
+impl LoadedInterpolator {
     fn sample_time(&self, idx: usize) -> f64 {
         self.samples[idx].time_seconds
     }
@@ -1041,10 +969,6 @@ impl StreamingResampler {
         let x_left = self.sample_time(left);
         let x_right = self.sample_time(left + 1);
         target_time >= x_left && target_time <= x_right
-    }
-
-    fn has_cubic_lookahead(&self, left: usize, final_flush: bool) -> bool {
-        left == 0 || left + 2 < self.samples.len() || final_flush
     }
 
     fn interpolate_value<F>(&self, left: usize, target_time: f64, value_fn: F) -> f32
@@ -1170,303 +1094,48 @@ impl StreamingResampler {
         }
         Ok(())
     }
-
-    fn prune(&mut self) {
-        let remove = self.acc_left.saturating_sub(1);
-        if remove == 0 {
-            return;
-        }
-        for _ in 0..remove {
-            let _ = self.samples.pop_front();
-        }
-        self.acc_left = self.acc_left.saturating_sub(remove);
-    }
 }
 
-/// Main function to read CWA data and return structured data
-pub fn read_cwa_data(
-    file_path: &str,
-    start_block: Option<usize>,
-    num_blocks: Option<usize>,
-    options: Option<CwaParsingOptions>,
-) -> Result<CwaDataResult, CwaError> {
-    read_cwa_data_from_reader(
-        &mut File::open(file_path)?,
-        start_block,
-        num_blocks,
-        options,
-    )
-}
-
-/// Decode a complete CWA file from seekable input, including uploaded bytes in a
-/// `std::io::Cursor`. Positions are relative to the start of the reader.
-pub fn read_cwa_data_from_reader<R: Read + Seek>(
-    mut file: &mut R,
-    start_block: Option<usize>,
-    num_blocks: Option<usize>,
-    options: Option<CwaParsingOptions>,
-) -> Result<CwaDataResult, CwaError> {
-    let (start_block, end_block, initial_previous_packet_end) =
-        prepare_cwa_data_blocks(file, start_block, num_blocks)?;
-    let options = options.unwrap_or_default();
-
-    // Pre-allocate columnar vectors for better performance
-    let mut all_timestamps = Vec::new();
-    let mut acc_x = Vec::new();
-    let mut acc_y = Vec::new();
-    let mut acc_z = Vec::new();
-    let mut gyro_x = None;
-    let mut gyro_y = None;
-    let mut gyro_z = None;
-    let mut mag_x = None;
-    let mut mag_y = None;
-    let mut mag_z = None;
-    let mut all_temperatures = if options.include_temperature {
-        Some(Vec::new())
-    } else {
-        None
-    };
-    let mut all_light_values = if options.include_light {
-        Some(Vec::new())
-    } else {
-        None
-    };
-    let mut all_battery_levels = if options.include_battery {
-        Some(Vec::new())
-    } else {
-        None
-    };
-
-    let mut previous_packet_end: Option<f64> = initial_previous_packet_end;
-    for _block_idx in start_block..end_block {
-        let buffer = read_sector(&mut file)?.ok_or("Unexpected end of CWA data")?;
-        if packet_meta(&buffer)?.is_none() {
-            continue;
-        }
-        let data_block = CwaDataBlock::from_buffer(&buffer)?;
-
-        // Parse samples from this block
-        let samples = data_block.parse_samples(&options)?;
-        let sample_count = samples.len();
-
-        // Calculate timestamps for each sample
-        let (timestamps, packet_end) = calculate_sample_timestamps_with_prev_end(
-            &data_block,
-            sample_count,
-            previous_packet_end,
-        )?;
-        previous_packet_end = Some(packet_end);
-
-        // Extract auxiliary data (calibrated values to match Java implementation)
-        let temp_value = data_block.get_temperature_celsius();
-        let light_value = data_block.get_light_calibrated();
-        let battery_value = data_block.get_battery_voltage();
-
-        // Check array bounds before any column can overflow on wasm32.
-        let total_samples = checked_sample_count(all_timestamps.len(), sample_count)?;
-        reserve_column(&mut all_timestamps, sample_count)?;
-        for column in [&mut acc_x, &mut acc_y, &mut acc_z] {
-            reserve_column(column, sample_count)?;
-        }
-        for column in [
-            &mut all_temperatures,
-            &mut all_light_values,
-            &mut all_battery_levels,
-        ]
-        .into_iter()
-        .flatten()
-        {
-            reserve_column(column, sample_count)?;
-        }
-        all_timestamps.extend(timestamps);
-
-        // Directly populate columnar vectors (eliminates first copy)
-        for sample in samples {
-            acc_x.push(sample.acc_x);
-            acc_y.push(sample.acc_y);
-            acc_z.push(sample.acc_z);
-            let previous_len = acc_x.len() - 1;
-            append_sensor_value(&mut gyro_x, sample.gyro_x, previous_len)?;
-            append_sensor_value(&mut gyro_y, sample.gyro_y, previous_len)?;
-            append_sensor_value(&mut gyro_z, sample.gyro_z, previous_len)?;
-            append_sensor_value(&mut mag_x, sample.mag_x, previous_len)?;
-            append_sensor_value(&mut mag_y, sample.mag_y, previous_len)?;
-            append_sensor_value(&mut mag_z, sample.mag_z, previous_len)?;
-        }
-
-        // Only collect auxiliary data if requested
-        if let Some(ref mut temps) = all_temperatures {
-            temps.resize(total_samples, temp_value);
-        }
-        if let Some(ref mut lights) = all_light_values {
-            lights.resize(total_samples, light_value);
-        }
-        if let Some(ref mut batteries) = all_battery_levels {
-            batteries.resize(total_samples, battery_value);
-        }
+pub(crate) fn append_batch(
+    output: &mut CwaDataResult,
+    mut batch: CwaDataResult,
+) -> Result<(), CwaError> {
+    let previous_len = output.timestamps.len();
+    let added = batch.timestamps.len();
+    checked_sample_count(previous_len, added)?;
+    reserve_column(&mut output.timestamps, added)?;
+    output.timestamps.append(&mut batch.timestamps);
+    for (out, values) in [
+        (&mut output.acc_x, &mut batch.acc_x),
+        (&mut output.acc_y, &mut batch.acc_y),
+        (&mut output.acc_z, &mut batch.acc_z),
+    ] {
+        reserve_column(out, added)?;
+        out.append(values);
     }
-
-    if acc_x.is_empty() {
-        return Err("No valid sample data found in the specified range".into());
-    }
-
-    // Return structured data in columnar format
-    Ok(CwaDataResult {
-        timestamps: all_timestamps,
-        acc_x,
-        acc_y,
-        acc_z,
-        gyro_x,
-        gyro_y,
-        gyro_z,
-        mag_x,
-        mag_y,
-        mag_z,
-        temperatures: all_temperatures,
-        light_values: all_light_values,
-        battery_levels: all_battery_levels,
-    })
-}
-
-pub(crate) fn read_cwa_data_resampled_from_reader<R: Read + Seek>(
-    mut file: &mut R,
-    start_block: Option<usize>,
-    num_blocks: Option<usize>,
-    parse_options: CwaParsingOptions,
-    resample_options: ResampleOptions,
-    cut_range: TimeRangeOptions,
-) -> Result<CwaDataResult, CwaError> {
-    let (start_block, end_block, initial_previous_packet_end) =
-        prepare_cwa_data_blocks(file, start_block, num_blocks)?;
-    let mut previous_packet_end: Option<f64> = initial_previous_packet_end;
-    let mut resampler: Option<StreamingResampler> = None;
-    let resample_range = cut_range;
-
-    'block_loop: for _block_idx in start_block..end_block {
-        let buffer = read_sector(&mut file)?.ok_or("Unexpected end of CWA data")?;
-        if packet_meta(&buffer)?.is_none() {
-            continue;
+    for (out, values) in [
+        (&mut output.gyro_x, batch.gyro_x),
+        (&mut output.gyro_y, batch.gyro_y),
+        (&mut output.gyro_z, batch.gyro_z),
+        (&mut output.mag_x, batch.mag_x),
+        (&mut output.mag_y, batch.mag_y),
+        (&mut output.mag_z, batch.mag_z),
+        (&mut output.temperatures, batch.temperatures),
+        (&mut output.light_values, batch.light_values),
+        (&mut output.battery_levels, batch.battery_levels),
+    ] {
+        if values.is_some() {
+            ensure_sensor_column(out, previous_len)?;
         }
-        let data_block = CwaDataBlock::from_buffer(&buffer)?;
-
-        let samples = data_block.parse_samples(&parse_options)?;
-        let sample_count = samples.len();
-        let (timestamps, packet_end) = calculate_sample_timestamps_with_prev_end(
-            &data_block,
-            sample_count,
-            previous_packet_end,
-        )?;
-        previous_packet_end = Some(packet_end);
-
-        let temp_value = data_block.get_temperature_celsius();
-        let light_value = data_block.get_light_calibrated();
-        let battery_value = data_block.get_battery_voltage();
-
-        if resampler.is_none() {
-            resampler = Some(StreamingResampler::new(
-                &parse_options,
-                resample_options,
-                resample_range,
-            )?);
-        }
-        let state = resampler.as_mut().expect("resampler initialized");
-
-        for i in 0..sample_count {
-            let ts_seconds = timestamps[i] as f64 / 1_000_000.0;
-            state.push_sample(
-                ts_seconds,
-                &samples[i],
-                temp_value,
-                light_value,
-                battery_value,
-            )?;
-            // Output can finish before the final selected source sample.
-            // Keep observing channel presence until the source reaches the cut end.
-            if state.is_done()
-                && cut_range
-                    .end_time_seconds
-                    .is_some_and(|end| ts_seconds >= end)
-            {
-                break 'block_loop;
+        if let Some(out) = out {
+            reserve_column(out, added)?;
+            match values {
+                Some(values) => out.extend(values),
+                None => out.resize(previous_len + added, f32::NAN),
             }
         }
     }
-
-    let state = resampler.ok_or("No valid sample data found in the specified range")?;
-    state.into_result()
-}
-
-pub(crate) fn filter_data_by_time_range(
-    data: CwaDataResult,
-    range: TimeRangeOptions,
-) -> Result<CwaDataResult, CwaError> {
-    if !range.has_bounds() {
-        return Ok(data);
-    }
-    range.validate()?;
-
-    let start = range.start_time_seconds;
-    let end = range.end_time_seconds;
-
-    let mut keep_indices = Vec::with_capacity(data.timestamps.len());
-    for (idx, ts) in data.timestamps.iter().enumerate() {
-        let ts_seconds = *ts as f64 / 1_000_000.0;
-        if start.is_some_and(|s| ts_seconds < s) {
-            continue;
-        }
-        if end.is_some_and(|e| ts_seconds >= e) {
-            continue;
-        }
-        keep_indices.push(idx);
-    }
-
-    if keep_indices.is_empty() {
-        return Err("No samples remain after applying time range".into());
-    }
-
-    let filter_f32 = |src: Vec<f32>| -> Vec<f32> { keep_indices.iter().map(|&i| src[i]).collect() };
-
-    let filter_sensor = |src: Option<Vec<f32>>| {
-        src.map(filter_f32)
-            .filter(|values| values.iter().any(|value| !value.is_nan()))
-    };
-
-    let timestamps = keep_indices.iter().map(|&i| data.timestamps[i]).collect();
-    let acc_x = filter_f32(data.acc_x);
-    let acc_y = filter_f32(data.acc_y);
-    let acc_z = filter_f32(data.acc_z);
-    let gyro_x = filter_sensor(data.gyro_x);
-    let gyro_y = filter_sensor(data.gyro_y);
-    let gyro_z = filter_sensor(data.gyro_z);
-
-    let mag_x = filter_sensor(data.mag_x);
-    let mag_y = filter_sensor(data.mag_y);
-    let mag_z = filter_sensor(data.mag_z);
-    let temperatures = data
-        .temperatures
-        .map(|src| keep_indices.iter().map(|&i| src[i]).collect());
-    let light_values = data
-        .light_values
-        .map(|src| keep_indices.iter().map(|&i| src[i]).collect());
-    let battery_levels = data
-        .battery_levels
-        .map(|src| keep_indices.iter().map(|&i| src[i]).collect());
-
-    Ok(CwaDataResult {
-        timestamps,
-        acc_x,
-        acc_y,
-        acc_z,
-        gyro_x,
-        gyro_y,
-        gyro_z,
-        mag_x,
-        mag_y,
-        mag_z,
-        temperatures,
-        light_values,
-        battery_levels,
-    })
+    Ok(())
 }
 
 fn cubic_lagrange_4pt(t: f64, x: [f64; 4], y: [f64; 4]) -> Option<f64> {
@@ -1542,31 +1211,6 @@ fn natural_packet_bounds(
         timestamp_offset: data_block.timestamp_offset,
     }
     .natural_bounds())
-}
-
-fn find_previous_packet_end<R: Read + Seek>(
-    file: &mut R,
-    start_block: usize,
-) -> Result<Option<f64>, CwaError> {
-    if start_block == 0 {
-        return Ok(None);
-    }
-
-    let mut idx = start_block;
-    while idx > 0 {
-        idx -= 1;
-        let pos = data_block_offset(idx as u64)?;
-        file.seek(SeekFrom::Start(pos))?;
-
-        let buffer = read_sector(file)?.ok_or("Unexpected end of CWA data")?;
-        let Some(meta) = packet_meta(&buffer)? else {
-            continue;
-        };
-        let (_, t1) = meta.natural_bounds();
-        return Ok(Some(t1));
-    }
-
-    Ok(None)
 }
 
 fn csv_header(options: &CwaParsingOptions, channels: SensorChannels) -> Vec<&'static str> {
@@ -1679,20 +1323,22 @@ fn write_csv_row<W: std::io::Write>(
     Ok(())
 }
 
-fn write_data_result_csv<W: Write>(
-    output: W,
+pub(crate) fn format_csv_batch(
+    output: Vec<u8>,
     data: &CwaDataResult,
     options: &CwaParsingOptions,
-    offset_us: i64,
-) -> Result<(), CwaError> {
+    channels: SensorChannels,
+    write_header: bool,
+) -> Result<Vec<u8>, CwaError> {
     let mut writer = WriterBuilder::new()
         .has_headers(false)
         .quote_style(csv::QuoteStyle::Never)
         .from_writer(output);
 
-    let channels = data.sensor_channels();
     let header = csv_header(options, channels);
-    writer.write_record(&header)?;
+    if write_header {
+        writer.write_record(&header)?;
+    }
 
     let field_count = header.len();
     let mut row_fields: Vec<String> = (0..field_count)
@@ -1707,9 +1353,7 @@ fn write_data_result_csv<W: Write>(
             options,
             channels,
             CsvRowValues {
-                timestamp: data.timestamps[i]
-                    .checked_sub(offset_us)
-                    .ok_or("Timestamp overflow after fixed UTC offset")?,
+                timestamp: data.timestamps[i],
                 acc_x: data.acc_x[i],
                 acc_y: data.acc_y[i],
                 acc_z: data.acc_z[i],
@@ -1727,134 +1371,9 @@ fn write_data_result_csv<W: Write>(
     }
 
     writer.flush()?;
-    Ok(())
-}
-
-fn scan_sensor_channels<R: Read + Seek>(
-    file: &mut R,
-    start_block: usize,
-    end_block: usize,
-    options: &CwaParsingOptions,
-) -> Result<SensorChannels, CwaError> {
-    let mut channels = SensorChannels::default();
-    for _ in start_block..end_block {
-        let buffer = read_sector(file)?.ok_or("Unexpected end of CWA data")?;
-        if packet_meta(&buffer)?.is_some() {
-            let axes = buffer[25] >> 4;
-            channels.gyro |= axes >= 6;
-            channels.magnetometer |= axes == 9 && options.include_magnetometer;
-        }
-    }
-    file.seek(SeekFrom::Start(data_block_offset(start_block as u64)?))?;
-    Ok(channels)
-}
-
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn write_cwa_csv_from_reader<R, W, F>(
-    mut file: &mut R,
-    create_output: F,
-    start_block: Option<usize>,
-    num_blocks: Option<usize>,
-    options: CwaParsingOptions,
-    resample_options: Option<ResampleOptions>,
-    time_range: TimeRangeOptions,
-    offset_us: i64,
-) -> Result<(), CwaError>
-where
-    R: Read + Seek,
-    W: Write,
-    F: FnOnce() -> Result<W, CwaError>,
-{
-    time_range.validate()?;
-
-    if let Some(resample) = resample_options {
-        let data = read_cwa_data_resampled_from_reader(
-            file,
-            start_block,
-            num_blocks,
-            options.clone(),
-            resample,
-            time_range,
-        )?;
-        return write_data_result_csv(create_output()?, &data, &options, offset_us);
-    }
-
-    if time_range.has_bounds() {
-        let data = read_cwa_data_from_reader(file, start_block, num_blocks, Some(options.clone()))?;
-        let data = filter_data_by_time_range(data, time_range)?;
-        return write_data_result_csv(create_output()?, &data, &options, offset_us);
-    }
-
-    let (start_block, end_block, initial_previous_packet_end) =
-        prepare_cwa_data_blocks(file, start_block, num_blocks)?;
-
-    let channels = scan_sensor_channels(&mut file, start_block, end_block, &options)?;
-
-    let output = create_output()?;
-    let mut writer = WriterBuilder::new()
-        .has_headers(false)
-        .quote_style(csv::QuoteStyle::Never)
-        .from_writer(output);
-
-    let header = csv_header(&options, channels);
-    writer.write_record(&header)?;
-
-    let field_count = header.len();
-    let mut row_fields: Vec<String> = (0..field_count)
-        .map(|_| String::with_capacity(32))
-        .collect();
-
-    let mut previous_packet_end: Option<f64> = initial_previous_packet_end;
-    for _block_idx in start_block..end_block {
-        let buffer = read_sector(&mut file)?.ok_or("Unexpected end of CWA data")?;
-        if packet_meta(&buffer)?.is_none() {
-            continue;
-        }
-        let data_block = CwaDataBlock::from_buffer(&buffer)?;
-
-        let samples = data_block.parse_samples(&options)?;
-        let sample_count = samples.len();
-        let (timestamps, packet_end) = calculate_sample_timestamps_with_prev_end(
-            &data_block,
-            sample_count,
-            previous_packet_end,
-        )?;
-        previous_packet_end = Some(packet_end);
-
-        let temp_value = data_block.get_temperature_celsius();
-        let light_value = data_block.get_light_calibrated();
-        let battery_value = data_block.get_battery_voltage();
-
-        for i in 0..sample_count {
-            let sample = &samples[i];
-            write_csv_row(
-                &mut writer,
-                &mut row_fields,
-                &options,
-                channels,
-                CsvRowValues {
-                    timestamp: timestamps[i]
-                        .checked_sub(offset_us)
-                        .ok_or("Timestamp overflow after fixed UTC offset")?,
-                    acc_x: sample.acc_x,
-                    acc_y: sample.acc_y,
-                    acc_z: sample.acc_z,
-                    gyro_x: sample.gyro_x,
-                    gyro_y: sample.gyro_y,
-                    gyro_z: sample.gyro_z,
-                    mag_x: sample.mag_x,
-                    mag_y: sample.mag_y,
-                    mag_z: sample.mag_z,
-                    temperature: Some(temp_value),
-                    light: Some(light_value),
-                    battery: Some(battery_value),
-                },
-            )?;
-        }
-    }
-
-    writer.flush()?;
-    Ok(())
+    writer
+        .into_inner()
+        .map_err(|error| CwaError::from(error.to_string()))
 }
 
 #[cfg(test)]
@@ -1879,11 +1398,18 @@ mod tests {
             packet[28..30].copy_from_slice(&2u16.to_le_bytes());
             packet[30..32].copy_from_slice(&256i16.to_le_bytes());
         }
-        let full = read_cwa_data_from_reader(&mut std::io::Cursor::new(&bytes), None, None, None)
+        let full = crate::reader::CwaReader::new(std::io::Cursor::new(&bytes))
+            .read_data(&crate::reader::CwaReadOptions::default())
             .expect("uploaded recording");
-        let cut =
-            read_cwa_data_from_reader(&mut std::io::Cursor::new(&bytes), Some(1), Some(1), None)
-                .expect("block cut");
+        let cut = crate::reader::CwaReader::new(std::io::Cursor::new(&bytes))
+            .read_data(&crate::reader::CwaReadOptions {
+                cut: CutConfig::Blocks {
+                    start: Some(1),
+                    end: Some(2),
+                },
+                ..Default::default()
+            })
+            .expect("block cut");
         assert_eq!(full.acc_x, vec![1.0, 0.0, 1.0, 0.0]);
         assert!(full.gyro_x.is_none());
         assert_eq!(cut.timestamps, full.timestamps[2..]);
@@ -1934,20 +1460,6 @@ mod tests {
         let y = ((((value >> 4) as u16) & 0xffc0) as i16) >> (6 - exp);
         let z = ((((value >> 14) as u16) & 0xffc0) as i16) >> (6 - exp);
         (x, y, z)
-    }
-
-    fn sample_with_acc_x(acc_x: f32) -> SampleData {
-        SampleData {
-            acc_x,
-            acc_y: 0.0,
-            acc_z: 0.0,
-            gyro_x: None,
-            gyro_y: None,
-            gyro_z: None,
-            mag_x: None,
-            mag_y: None,
-            mag_z: None,
-        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -2151,39 +1663,5 @@ mod tests {
                 .expect("seeded block2");
 
         assert_eq!(full_ts_2, seeded_ts_2);
-    }
-
-    #[test]
-    fn streaming_resampler_waits_for_cubic_lookahead() {
-        let parse_options = CwaParsingOptions {
-            include_magnetometer: false,
-            include_temperature: false,
-            include_light: false,
-            include_battery: false,
-        };
-        let mut resampler = StreamingResampler::new(
-            &parse_options,
-            ResampleOptions { target_hz: 2.0 },
-            TimeRangeOptions {
-                start_time_seconds: Some(1.5),
-                end_time_seconds: Some(2.0),
-            },
-        )
-        .expect("resampler");
-
-        for t in [0.0_f64, 1.0, 2.0] {
-            resampler
-                .push_sample(t, &sample_with_acc_x((t * t * t) as f32), 0.0, 0.0, 0.0)
-                .expect("sample");
-        }
-        assert!(resampler.result.timestamps.is_empty());
-
-        resampler
-            .push_sample(3.0, &sample_with_acc_x(27.0), 0.0, 0.0, 0.0)
-            .expect("sample");
-        let result = resampler.into_result().expect("result");
-
-        assert_eq!(result.timestamps, vec![1_500_000]);
-        assert!((result.acc_x[0] - 3.375).abs() < 1e-6);
     }
 }

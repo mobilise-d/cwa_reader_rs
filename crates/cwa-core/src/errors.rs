@@ -1,6 +1,18 @@
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ContextSide {
+    Left,
+    Right,
+}
+
 #[derive(Debug)]
 pub enum CwaError {
     Io(std::io::Error),
+    InsufficientContext {
+        side: ContextSide,
+        owned_packets: std::ops::Range<usize>,
+        loaded_packets: std::ops::Range<usize>,
+        reason: &'static str,
+    },
     String(String),
 }
 
@@ -34,6 +46,8 @@ impl std::fmt::Display for CwaError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             CwaError::Io(e) => write!(f, "IO error: {}", e),
+            CwaError::InsufficientContext { side, owned_packets, loaded_packets, reason } => write!(f,
+                "InsufficientContext: {side:?} context for owned packets {owned_packets:?} in loaded packets {loaded_packets:?}: {reason}; increase overlap_packets"),
             CwaError::String(s) => write!(f, "{}", s),
         }
     }

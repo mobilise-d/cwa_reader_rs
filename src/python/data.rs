@@ -1,3 +1,4 @@
+use cwa_core::batch::BatchConfig;
 use cwa_core::data::{CutConfig, CwaDataResult, CwaParsingOptions, ResampleOptions};
 use cwa_core::reader::{CwaReadOptions, CwaReader};
 use numpy::IntoPyArray;
@@ -5,6 +6,35 @@ use pyo3::prelude::*;
 use pyo3::types::{PyDelta, PyDeltaAccess, PyDict, PyTzInfo};
 use std::fs::File;
 use std::io::BufWriter;
+
+fn reader_error(py: Python, error: cwa_core::errors::CwaError) -> PyErr {
+    let exception = PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(error.to_string());
+    if let cwa_core::errors::CwaError::InsufficientContext {
+        side,
+        owned_packets,
+        loaded_packets,
+        reason,
+    } = error
+    {
+        let value = exception.value(py);
+        let side = match side {
+            cwa_core::errors::ContextSide::Left => "left",
+            cwa_core::errors::ContextSide::Right => "right",
+        };
+        if let Err(error) = value
+            .setattr("code", "InsufficientContext")
+            .and_then(|_| value.setattr("side", side))
+            .and_then(|_| value.setattr("owned_packets", (owned_packets.start, owned_packets.end)))
+            .and_then(|_| {
+                value.setattr("loaded_packets", (loaded_packets.start, loaded_packets.end))
+            })
+            .and_then(|_| value.setattr("reason", reason))
+        {
+            return error;
+        }
+    }
+    exception
+}
 
 fn get_optional_f64(dict: &Bound<'_, PyDict>, key: &str) -> PyResult<Option<f64>> {
     let Some(value) = dict.get_item(key)? else {
@@ -213,7 +243,9 @@ fn fixed_timezone_offset_us(timezone: Option<&Bound<'_, PyTzInfo>>) -> PyResult<
     resample_hz=None,
     resample_method="cubic",
     *,
-    fixed_utc_offset_timezone=None
+    fixed_utc_offset_timezone=None,
+    batch_packets=256,
+    overlap_packets=1
 ))]
 #[allow(clippy::too_many_arguments)]
 pub fn read_cwa_file(
@@ -227,6 +259,8 @@ pub fn read_cwa_file(
     resample_hz: Option<f64>,
     resample_method: &str,
     fixed_utc_offset_timezone: Option<&Bound<'_, PyTzInfo>>,
+    batch_packets: usize,
+    overlap_packets: usize,
 ) -> PyResult<Py<PyAny>> {
     let options = CwaParsingOptions {
         include_magnetometer,
@@ -238,7 +272,15 @@ pub fn read_cwa_file(
     let cut = parse_cut_config(cut)?;
     let resample_options = parse_resample_options(resample_hz, resample_method)?;
     let offset_us = fixed_timezone_offset_us(fixed_utc_offset_timezone)?;
+    let batch = BatchConfig {
+        packet_count: batch_packets,
+        overlap_packets,
+    };
+    batch
+        .validate()
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
     let options = CwaReadOptions {
+        batch,
         cut,
         channels: options,
         resample: resample_options,
@@ -246,7 +288,7 @@ pub fn read_cwa_file(
     };
     let data = CwaReader::open(file_path)
         .and_then(|mut reader| reader.read_data(&options))
-        .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
+        .map_err(|e| reader_error(py, e))?;
     create_python_dataframe(py, data, offset_us.is_some())
 }
 
@@ -268,10 +310,13 @@ pub fn read_cwa_file(
     resample_hz=None,
     resample_method="cubic",
     *,
-    fixed_utc_offset_timezone=None
+    fixed_utc_offset_timezone=None,
+    batch_packets=256,
+    overlap_packets=1
 ))]
 #[allow(clippy::too_many_arguments)]
 pub fn write_cwa_csv(
+    py: Python,
     file_path: &str,
     output_path: &str,
     cut: Option<&Bound<'_, PyAny>>,
@@ -282,6 +327,8 @@ pub fn write_cwa_csv(
     resample_hz: Option<f64>,
     resample_method: &str,
     fixed_utc_offset_timezone: Option<&Bound<'_, PyTzInfo>>,
+    batch_packets: usize,
+    overlap_packets: usize,
 ) -> PyResult<()> {
     let options = CwaParsingOptions {
         include_magnetometer,
@@ -292,7 +339,15 @@ pub fn write_cwa_csv(
 
     let cut = parse_cut_config(cut)?;
     let resample_options = parse_resample_options(resample_hz, resample_method)?;
+    let batch = BatchConfig {
+        packet_count: batch_packets,
+        overlap_packets,
+    };
+    batch
+        .validate()
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
     let options = CwaReadOptions {
+        batch,
         cut,
         channels: options,
         resample: resample_options,
@@ -310,5 +365,5 @@ pub fn write_cwa_csv(
                 &options,
             )
         })
-        .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))
+        .map_err(|e| reader_error(py, e))
 }

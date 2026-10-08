@@ -336,7 +336,7 @@ pub fn scan_data_timing(file_path: &str) -> Result<DataTimingSummary, errors::Cw
 /// Scan metadata and packet timing from the reader's current position without
 /// decoding sensor measurements.
 pub fn scan_data_timing_from_reader<R: Read>(
-    mut file: &mut R,
+    file: &mut R,
 ) -> Result<DataTimingSummary, errors::CwaError> {
     let mut metadata = [0u8; 1024];
     file.read_exact(&mut metadata)?;
@@ -349,18 +349,46 @@ pub fn scan_data_timing_from_reader<R: Read>(
     let mut last_sample_us = None;
     let mut sample_count_total = 0_u64;
 
-    while let Some(buffer) = read_sector(&mut file)? {
-        let Some(meta) = packet_meta(&buffer)? else {
-            continue;
-        };
-        let (packet_first_us, packet_last_us) = sample_bounds_us(&meta, previous_packet_end);
+    // Full reports read contiguous packet batches; boundary metadata lookup above
+    // remains deliberately targeted and does not use this buffer.
+    let mut buffer = vec![0; crate::batch::BatchConfig::default().packet_count * 512];
+    loop {
+        let mut filled = 0;
+        while filled < buffer.len() {
+            match file.read(&mut buffer[filled..]) {
+                Ok(0) => break,
+                Ok(count) => filled += count,
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(error) => return Err(error.into()),
+            }
+        }
+        if filled == 0 {
+            break;
+        }
+        if filled % 512 != 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "failed to fill whole buffer",
+            )
+            .into());
+        }
+        for packet in buffer[..filled].chunks_exact(512) {
+            let buffer: &[u8; 512] = packet.try_into().expect("complete metadata packet");
+            let Some(meta) = packet_meta(buffer)? else {
+                continue;
+            };
+            let (packet_first_us, packet_last_us) = sample_bounds_us(&meta, previous_packet_end);
 
-        first_sample_us.get_or_insert(packet_first_us);
-        last_sample_us = Some(packet_last_us);
-        sample_count_total = sample_count_total
-            .checked_add(meta.sample_count as u64)
-            .ok_or("CWA sample count overflow")?;
-        previous_packet_end = Some(meta.natural_bounds().1);
+            first_sample_us.get_or_insert(packet_first_us);
+            last_sample_us = Some(packet_last_us);
+            sample_count_total = sample_count_total
+                .checked_add(meta.sample_count as u64)
+                .ok_or("CWA sample count overflow")?;
+            previous_packet_end = Some(meta.natural_bounds().1);
+        }
+        if filled < buffer.len() {
+            break;
+        }
     }
 
     Ok(DataTimingSummary {

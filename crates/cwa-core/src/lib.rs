@@ -5,3 +5,5 @@ pub mod errors;
 pub mod header;
 mod packet;
 pub mod reader;
+
+pub mod batch;

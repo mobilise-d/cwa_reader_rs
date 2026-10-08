@@ -15,6 +15,7 @@ pub struct CwaReadOptions {
     pub channels: CwaParsingOptions,
     pub resample: Option<ResampleOptions>,
     pub fixed_utc_offset_us: Option<i64>,
+    pub batch: crate::batch::BatchConfig,
 }
 
 impl Default for CwaReadOptions {
@@ -24,6 +25,7 @@ impl Default for CwaReadOptions {
             channels: CwaParsingOptions::default(),
             resample: None,
             fixed_utc_offset_us: None,
+            batch: Default::default(),
         }
     }
 }
@@ -124,8 +126,8 @@ impl<R: Read + Seek> CwaReader<R> {
         Ok(SamplingConsistencyReport::from_timing(&header, &timing))
     }
 
-    /// Write CSV to an arbitrary sink. Unresampled reads without seconds bounds
-    /// stream packets; seconds bounds or resampling materialize selected output.
+    /// Write CSV to an arbitrary sink using bounded packet batches. A bounded
+    /// channel-union pass precedes output, which uses the same decoding engine.
     pub fn write_csv<W: Write>(
         &mut self,
         output: &mut W,
@@ -142,49 +144,62 @@ impl<R: Read + Seek> CwaReader<R> {
         create_output: F,
         options: &CwaReadOptions,
     ) -> Result<(), CwaError> {
-        let plan = data::resolve_read_plan_from_reader(&mut self.input, options.cut)?;
-        data::write_cwa_csv_from_reader(
-            &mut self.input,
-            create_output,
-            plan.start_block,
-            plan.num_blocks,
-            options.channels.clone(),
-            options.resample,
-            plan.time_range,
-            options.fixed_utc_offset_us.unwrap_or(0),
-        )
+        let file_size = self.input.seek(SeekFrom::End(0))?;
+        let mut session = crate::batch::CwaBatchSession::new_csv(file_size, options.clone())?;
+        let mut buffer = Vec::new();
+        let mut factory = Some(create_output);
+        let mut output = None;
+        while let Some(request) = session.request() {
+            self.preload(request, &mut buffer)?;
+            if let Some(chunk) = session.provide_csv(&buffer)? {
+                if output.is_none() {
+                    output = Some(factory.take().expect("output factory is called once")()?);
+                }
+                output
+                    .as_mut()
+                    .expect("output initialized")
+                    .write_all(&chunk)?;
+            }
+        }
+        if let Some(mut output) = output {
+            output.flush()?;
+        }
+        Ok(())
+    }
+
+    fn preload(
+        &mut self,
+        request: crate::batch::ReadRequest,
+        buffer: &mut Vec<u8>,
+    ) -> Result<(), CwaError> {
+        if request.length > buffer.len() {
+            buffer
+                .try_reserve_exact(request.length - buffer.len())
+                .map_err(|e| format!("Cannot allocate CWA packet batch: {e}"))?;
+        }
+        buffer.resize(request.length, 0);
+        self.input.seek(SeekFrom::Start(request.offset))?;
+        self.input.read_exact(buffer)?;
+        Ok(())
     }
 
     /// Decode selected samples into column arrays. The returned recording is
     /// allocated even when input decoding and resampling process packets incrementally.
     pub fn read_data(&mut self, options: &CwaReadOptions) -> Result<CwaDataResult, CwaError> {
-        let plan = data::resolve_read_plan_from_reader(&mut self.input, options.cut)?;
-        let mut data = if let Some(resample) = options.resample {
-            data::read_cwa_data_resampled_from_reader(
-                &mut self.input,
-                plan.start_block,
-                plan.num_blocks,
-                options.channels.clone(),
-                resample,
-                plan.time_range,
-            )?
-        } else {
-            let data = data::read_cwa_data_from_reader(
-                &mut self.input,
-                plan.start_block,
-                plan.num_blocks,
-                Some(options.channels.clone()),
-            )?;
-            data::filter_data_by_time_range(data, plan.time_range)?
-        };
-        if let Some(offset) = options.fixed_utc_offset_us {
-            for timestamp in &mut data.timestamps {
-                *timestamp = timestamp
-                    .checked_sub(offset)
-                    .ok_or("Timestamp overflow after fixed UTC offset")?;
+        let file_size = self.input.seek(SeekFrom::End(0))?;
+        let mut session = crate::batch::CwaBatchSession::new(file_size, options.clone())?;
+        let mut result = data::empty_result(&options.channels);
+        let mut buffer = Vec::new();
+        while let Some(request) = session.request() {
+            self.preload(request, &mut buffer)?;
+            if let Some(batch) = session.provide(&buffer)? {
+                data::append_batch(&mut result, batch)?;
             }
         }
-        Ok(data)
+        if result.timestamps.is_empty() {
+            return Err(session.no_output_error());
+        }
+        Ok(result)
     }
 }
 
@@ -277,6 +292,7 @@ mod tests {
                 },
                 resample: Some(ResampleOptions::parse(25.0, "cubic").unwrap()),
                 fixed_utc_offset_us: Some(1_250_000),
+                batch: Default::default(),
                 channels: CwaParsingOptions {
                     include_magnetometer: false,
                     include_temperature: false,
