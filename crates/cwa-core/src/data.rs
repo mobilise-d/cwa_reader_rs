@@ -757,6 +757,12 @@ pub(crate) fn decode_loaded_batch(
                         interpolator.advance_left(interpolator.acc_left, target);
                     let left = interpolator.acc_left;
                     if !interpolator.has_bracket(left, target) {
+                        if !domain_end {
+                            return Err(plan.insufficient(
+                                crate::errors::ContextSide::Right,
+                                "target bracket is outside the loaded packets",
+                            ));
+                        }
                         break;
                     }
                     if left == 0

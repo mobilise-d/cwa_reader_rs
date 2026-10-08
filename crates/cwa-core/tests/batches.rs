@@ -588,3 +588,67 @@ fn short_resampled_seconds_cut_needs_no_unused_next_ownership_boundary() {
         ]
     );
 }
+
+#[test]
+fn one_sample_preload_reports_missing_right_bracket_before_emitting() {
+    use cwa_core::{
+        data::ResampleOptions,
+        errors::{ContextSide, CwaError},
+    };
+    let bytes = recording(2, 1);
+    let options = CwaReadOptions {
+        resample: Some(ResampleOptions::parse(25.0, "cubic").unwrap()),
+        batch: BatchConfig {
+            packet_count: 1,
+            overlap_packets: 0,
+        },
+        ..Default::default()
+    };
+    let mut session = CwaBatchSession::new(bytes.len() as u64, options.clone()).unwrap();
+    let mut rejected = false;
+    while let Some(request) = session.request() {
+        match session
+            .provide(&bytes[request.offset as usize..request.offset as usize + request.length])
+        {
+            Err(CwaError::InsufficientContext {
+                side,
+                owned_packets,
+                loaded_packets,
+                ..
+            }) => {
+                assert_eq!(side, ContextSide::Right);
+                assert_eq!(owned_packets, 0..1);
+                assert_eq!(loaded_packets, 0..1);
+                rejected = true;
+                break;
+            }
+            Err(error) => panic!("unexpected error: {error}"),
+            Ok(None) => (),
+            Ok(Some(_)) => panic!("one-sample window accepted without a right bracket"),
+        }
+    }
+    assert!(rejected);
+    let mut session = CwaBatchSession::new(
+        bytes.len() as u64,
+        CwaReadOptions {
+            batch: BatchConfig {
+                overlap_packets: 1,
+                ..options.batch
+            },
+            ..options
+        },
+    )
+    .unwrap();
+    let mut timestamps = Vec::new();
+    while let Some(request) = session.request() {
+        if let Some(batch) = session
+            .provide(&bytes[request.offset as usize..request.offset as usize + request.length])
+            .unwrap()
+        {
+            timestamps.extend(batch.timestamps);
+        }
+    }
+    // The second one-sample packet is continuity-adjusted to20ms, so only
+    // the0ms target lies inside the true two-sample recording at25Hz.
+    assert_eq!(timestamps, vec![1_325_376_000_000_000]);
+}
