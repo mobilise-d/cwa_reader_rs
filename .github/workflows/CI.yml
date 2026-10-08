@@ -195,6 +195,23 @@ jobs:
         uses: actions/attest-build-provenance@v2
         with:
           subject-path: 'wheels-*/*'
+      - name: Publish to PyPI
+        uses: PyO3/maturin-action@v1
+        with:
+          command: upload
+          args: --non-interactive --skip-existing wheels-*/*
+
+  release-assets:
+    name: Attach native GitHub assets
+    if: ${{ github.event_name == 'release' }}
+    needs: [release]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: wheels-*
       - name: Check release versions and checksum native distributions
         env:
           RELEASE_TAG: ${{ github.event.release.tag_name }}
@@ -223,8 +240,3 @@ jobs:
           GH_REPO: ${{ github.repository }}
           RELEASE_TAG: ${{ github.event.release.tag_name }}
         run: gh release upload "$RELEASE_TAG" wheels-*/* cwa_reader_rs-*-native-SHA256SUMS.txt
-      - name: Publish to PyPI
-        uses: PyO3/maturin-action@v1
-        with:
-          command: upload
-          args: --non-interactive --skip-existing wheels-*/*
