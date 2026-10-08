@@ -47,7 +47,10 @@ The package includes distribution metadata and the MIT license. NumPy and pandas
 are dependency metadata, not bundled library copies. Exact solved build/host
 package URLs and checksums are retained in the conda package's
 `info/recipe/rendered_recipe.yaml`. Compiler output, target sysconfig and SHA256
-of the compiled source files are in `share/cwa-reader-build`. The external
+of the compiled source files are in `share/cwa-reader-build`. The hashes include
+root Python adapter sources, nested `crates/cwa-core` Rust sources and Cargo
+manifests, along with package metadata and licenses. The recipe stages the local
+core crate from the same checkout as the Python adapter. The external
 `artifact-manifest.json` records source revision, dirty status and artifact hashes.
 A dirty status means the revision alone does not identify all source content;
 the source-file hashes identify the compilation inputs.

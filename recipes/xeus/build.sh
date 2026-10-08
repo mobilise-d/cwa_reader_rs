@@ -17,7 +17,12 @@ from pathlib import Path
 p=Path(os.environ['PREFIX'])/'share/cwa-reader-build'
 s=runpy.run_path(os.environ['MATURIN_PYTHON_SYSCONFIGDATA_DIR'])['build_time_vars']
 (p/'target-sysconfig.json').write_text(json.dumps(s,indent=2))
-files = sorted([*Path('src').rglob('*.rs'), Path('Cargo.toml'), Path('Cargo.lock'), Path('pyproject.toml')])
+files = sorted([
+    *Path('src').rglob('*.rs'), *Path('crates').rglob('*.rs'),
+    *Path('crates').rglob('Cargo.toml'), *Path('crates').rglob('LICENSE*'),
+    Path('Cargo.toml'), Path('Cargo.lock'), Path('pyproject.toml'),
+    Path('README.md'), Path('LICENSE'),
+])
 (p/'source-files.json').write_text(json.dumps({str(f): hashlib.sha256(f.read_bytes()).hexdigest() for f in files}, indent=2))
 PY
 rustc -Vv > "$PREFIX/share/cwa-reader-build/rustc.txt"
