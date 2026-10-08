@@ -162,17 +162,34 @@ fn create_python_dataframe(py: Python, data: CwaDataResult, utc: bool) -> PyResu
         .unbind())
 }
 
-fn parse_resample_options(
+fn parse_read_options(
+    cut: Option<&Bound<'_, PyAny>>,
+    channels: CwaParsingOptions,
     resample_hz: Option<f64>,
     resample_method: &str,
-) -> PyResult<Option<ResampleOptions>> {
-    match resample_hz {
-        Some(target_hz) => Ok(Some(
-            ResampleOptions::parse(target_hz, resample_method)
-                .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?,
-        )),
-        None => Ok(None),
-    }
+) -> PyResult<CwaReadOptions> {
+    let cut = parse_cut_config(cut)?;
+    let resample = resample_hz
+        .map(|hz| ResampleOptions::parse(hz, resample_method))
+        .transpose()
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+    Ok(CwaReadOptions {
+        cut,
+        channels,
+        resample,
+        ..Default::default()
+    })
+}
+
+fn parse_batch_config(packet_count: usize, overlap_packets: usize) -> PyResult<BatchConfig> {
+    let batch = BatchConfig {
+        packet_count,
+        overlap_packets,
+    };
+    batch
+        .validate()
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+    Ok(batch)
 }
 
 #[pyfunction]
@@ -262,34 +279,24 @@ pub fn read_cwa_file(
     batch_packets: usize,
     overlap_packets: usize,
 ) -> PyResult<Py<PyAny>> {
-    let options = CwaParsingOptions {
-        include_magnetometer,
-        include_temperature,
-        include_light,
-        include_battery,
-    };
-
-    let cut = parse_cut_config(cut)?;
-    let resample_options = parse_resample_options(resample_hz, resample_method)?;
-    let offset_us = fixed_timezone_offset_us(fixed_utc_offset_timezone)?;
-    let batch = BatchConfig {
-        packet_count: batch_packets,
-        overlap_packets,
-    };
-    batch
-        .validate()
-        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
-    let options = CwaReadOptions {
-        batch,
+    let mut options = parse_read_options(
         cut,
-        channels: options,
-        resample: resample_options,
-        fixed_utc_offset_us: offset_us,
-    };
+        CwaParsingOptions {
+            include_magnetometer,
+            include_temperature,
+            include_light,
+            include_battery,
+        },
+        resample_hz,
+        resample_method,
+    )?;
+    // Preserve the read API's timezone-before-batch validation order.
+    options.fixed_utc_offset_us = fixed_timezone_offset_us(fixed_utc_offset_timezone)?;
+    options.batch = parse_batch_config(batch_packets, overlap_packets)?;
     let data = CwaReader::open(file_path)
         .and_then(|mut reader| reader.read_data(&options))
         .map_err(|e| reader_error(py, e))?;
-    create_python_dataframe(py, data, offset_us.is_some())
+    create_python_dataframe(py, data, options.fixed_utc_offset_us.is_some())
 }
 
 #[pyfunction]
@@ -330,29 +337,20 @@ pub fn write_cwa_csv(
     batch_packets: usize,
     overlap_packets: usize,
 ) -> PyResult<()> {
-    let options = CwaParsingOptions {
-        include_magnetometer,
-        include_temperature,
-        include_light,
-        include_battery,
-    };
-
-    let cut = parse_cut_config(cut)?;
-    let resample_options = parse_resample_options(resample_hz, resample_method)?;
-    let batch = BatchConfig {
-        packet_count: batch_packets,
-        overlap_packets,
-    };
-    batch
-        .validate()
-        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
-    let options = CwaReadOptions {
-        batch,
+    let mut options = parse_read_options(
         cut,
-        channels: options,
-        resample: resample_options,
-        fixed_utc_offset_us: fixed_timezone_offset_us(fixed_utc_offset_timezone)?,
-    };
+        CwaParsingOptions {
+            include_magnetometer,
+            include_temperature,
+            include_light,
+            include_battery,
+        },
+        resample_hz,
+        resample_method,
+    )?;
+    // Preserve the CSV API's batch-before-timezone validation order.
+    options.batch = parse_batch_config(batch_packets, overlap_packets)?;
+    options.fixed_utc_offset_us = fixed_timezone_offset_us(fixed_utc_offset_timezone)?;
     CwaReader::open(file_path)
         .and_then(|mut reader| {
             reader.write_csv_with(
