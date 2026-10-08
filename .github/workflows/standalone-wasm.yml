@@ -5,6 +5,8 @@ on:
     branches: [main, master]
   pull_request:
   workflow_dispatch:
+  release:
+    types: [published]
 
 permissions:
   contents: read
@@ -56,6 +58,11 @@ jobs:
           node scripts/bench.mjs --input ../tests/reference_data/openmovement/example-610-steps.cwa \
             --output test-results/batch-metrics.json --alias public-fixture \
             --batches 64,256,1024 --repeats 1 --mode full
+      - name: Assemble tested browser release assets
+        working-directory: wasm
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: node scripts/release-assets.mjs
       - name: Upload browser bundle
         uses: actions/upload-artifact@v4
         with:
@@ -87,3 +94,27 @@ jobs:
             wasm/test-results/recording-metrics.json
             wasm/test-results/batch-metrics.json
             wasm/test-results/npm-consumer.json
+      - name: Upload assembled release assets
+        uses: actions/upload-artifact@v4
+        with:
+          name: standalone-browser-release-assets
+          path: wasm/dist/release/
+
+  release-assets:
+    if: github.event_name == 'release'
+    needs: browser-reader
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: standalone-browser-release-assets
+          path: release-assets
+      - name: Attach tested browser distributions to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        # Existing assets fail rather than replacing different bytes. On a retry,
+        # verify existing checksums and upload only missing assets manually.
+        run: gh release upload "$RELEASE_TAG" release-assets/* --repo "$GITHUB_REPOSITORY"

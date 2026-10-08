@@ -38,7 +38,8 @@ toolchains.
 
 `./wasm/build.sh` also creates `wasm/dist/mobilise-d-cwa-reader-VERSION.tgz`.
 The version comes from the Python Cargo package, currently 0.5.0. Download the
-`standalone-browser-npm` CI artifact or build locally, then install the tarball
+tarball from a [GitHub Release](https://github.com/mobilise-d/cwa_reader_rs/releases),
+the `standalone-browser-npm` CI artifact, or build locally, then install it
 in your application:
 
 ```sh
@@ -332,3 +333,11 @@ archive, and JSON test results. `test-results/npm-consumer.json` records the
 installed production consumer and its native metadata/sample parity. Artifact names do not
 match the native release workflow's `wheels-*/*` publication glob. Nothing is
 published to npm, PyPI or a conda channel by this workflow.
+
+On a published GitHub Release, the workflow attaches the tested npm tarball,
+a self-contained browser/demo archive, a validation archive, npm receipt, build
+provenance and SHA-256 checksums. The browser archive includes a dependency-free
+Node server: extract it and run `node scripts/serve.mjs`. Release assembly checks
+the version and clean source revision against the tag. Uploads fail if an asset
+already exists; recovery verifies existing checksums and uploads missing assets,
+without replacing different bytes. There is no npm registry publication.
