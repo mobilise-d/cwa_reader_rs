@@ -31,6 +31,61 @@ should be `application/wasm`. Rust and npm dependency locks live in
 `wasm/`, so its pinned build and lock stay independent of the Python/Emscripten
 toolchains.
 
+## Install the precompiled npm package
+
+`./wasm/build.sh` also creates `wasm/dist/mobilise-d-cwa-reader-VERSION.tgz`.
+The version comes from the root Cargo package, currently 0.4.0. Download the
+`standalone-browser-npm` CI artifact or build locally, then install the tarball
+in your application:
+
+```sh
+npm install /path/to/mobilise-d-cwa-reader-0.4.0.tgz
+```
+
+```js
+import { readMetadataFromFile, readCwaFileBatches } from '@mobilise-d/cwa-reader';
+import { blocks } from '@mobilise-d/cwa-reader/bytes';
+
+const metadata = await readMetadataFromFile(fileHandle); // Or File/Blob.
+for await (const samples of readCwaFileBatches(fileHandle, { cut: blocks(3, 10) })) {
+  await consumeSamples(samples);
+}
+```
+
+The package root exports the File facade; `/bytes` exports the synchronous byte
+API and cut helpers. The tarball includes compiled Wasm, worker/JS modules,
+TypeScript declarations, license, README and build metadata. Consumers need no
+Rust compiler, installation scripts or runtime npm dependencies. The package
+name is a provisional local scope; this workflow does not publish to a registry.
+`wasm/dist/npm-pack.json` records the archive inventory, integrity and SHA-256.
+
+## Source layout and deployment
+
+| Directory | Purpose |
+| --- | --- |
+| `wasm/src/` | Rust adapter over the shared core. |
+| `wasm/js/` | Handwritten File facade, declarations, worker and package README. |
+| `wasm/scripts/` | Package generation, local server, installed-consumer test and benchmark. |
+| `wasm/tests/` | Browser parity tests and minimal npm consumer. |
+| `wasm/example/` | File-selection demo. |
+| `wasm/pkg/` | Generated, directly servable runtime package. |
+| `wasm/dist/` | Installable npm archive and its receipt. |
+
+`wasm/build.sh` is the build entry point. Its single packaging step generates the
+npm manifest, source/tool checksums and archive. Runtime files remain native ESM
+with a separate Wasm asset and worker. This follows wasm-bindgen's
+[`--target web` deployment](https://wasm-bindgen.github.io/wasm-bindgen/reference/deployment.html)
+and works for direct serving as well as an application bundler. Static
+`new URL(..., import.meta.url)` asset references let
+[Vite rewrite production URLs](https://vite.dev/guide/assets.html).
+The installed-tarball test runs a production Vite build under a non-root base,
+then reads an actual File through the emitted worker and Wasm assets.
+
+We keep library prebundling out of this build. The consumer already bundles its
+JavaScript, while [Vite library mode](https://vite.dev/guide/build.html#library-mode)
+can inline assets. [npm pack](https://docs.npmjs.com/cli/v11/commands/npm-pack/)
+provides the local installable archive without registry publication.
+
 ## Feed a browser file to Rust
 
 After a file input or drag-and-drop handler supplies a browser `File`, or a
@@ -222,15 +277,12 @@ A small cut reduces output size, but does not reduce that full input copy.
 No path, temporary file or virtual filesystem is required by either interface.
 There is no zero-copy loading or all-day collector memory guarantee.
 
-Metadata lookup
-seeks the first and last usable packets and their needed predecessor; the
-sampling consistency report scans packet metadata throughout the recording.
-Neither operation allocates decoded sample columns, but both still copy the
-complete input bytes into Wasm. Metadata lookup does not validate unvisited
-interior packets; use decoding or the consistency report to inspect them.
-This bundle does not expose a targeted full-metadata File facade. Use manual
-`file.slice(0, 1024)` for header preview, or supply complete bytes for
-`readMetadata` and `samplingConsistencyReport`.
+Metadata lookup seeks the first and last usable packets and their needed
+predecessor; the sampling consistency report scans packet metadata throughout
+the recording. Neither operation allocates decoded sample columns. The File
+facade reads requested ranges; the byte API copies its complete input into Wasm.
+Metadata lookup does not validate unvisited interior packets; use decoding or
+the consistency report to inspect them.
 
 ## Browser tests and measurements
 
@@ -244,6 +296,7 @@ npm ci
 npx playwright install chromium
 npm run typecheck
 CWA_NATIVE_PYTHON=/tmp/cwa-browser-native/bin/python npm test
+CWA_NATIVE_PYTHON=/tmp/cwa-browser-native/bin/python npm run test:package
 ```
 
 Eighteen actual Chromium tests compare full metadata/report fields and 31 sample/CSV
@@ -285,7 +338,7 @@ usage. Initialization and file selection are outside the parser timing interval.
 Measure packet sizes against your own local recording without serving its bytes:
 
 ```sh
-node wasm/bench.mjs --input /local/recording.cwa --output /tmp/cwa-batches.json \
+node wasm/scripts/bench.mjs --input /local/recording.cwa --output /tmp/cwa-batches.json \
   --alias recording --batches 64,256,1024,2048,8192 --repeats 3 --mode all
 # Add --resample 60 for the same full/early/middle/late sweep with cubic resampling.
 # Add --seconds-cuts 0:30,3600:3630,7170:7200 to supply three seconds cuts
@@ -301,6 +354,8 @@ measurements, never the input path or sample values. The private recording is
 not uploaded. The benchmark uses a separate local server on port 5297.
 
 The separate `Standalone browser WASM` workflow builds/tests the module and
-uploads `standalone-browser-wasm` plus JSON test results. Artifact names do not
+uploads `standalone-browser-wasm`, the installable `standalone-browser-npm`
+archive, and JSON test results. `test-results/npm-consumer.json` records the
+installed production consumer and its native metadata/sample parity. Artifact names do not
 match the native release workflow's `wheels-*/*` publication glob. Nothing is
 published to npm, PyPI or a conda channel by this workflow.

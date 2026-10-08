@@ -6,7 +6,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 
-const root = path.dirname(fileURLToPath(import.meta.url));
+const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const { values } = parseArgs({ options: {
   input: { type: 'string' }, output: { type: 'string' },
   alias: { type: 'string', default: 'recording' },
@@ -24,7 +24,7 @@ if (!['full', 'cuts', 'all'].includes(values.mode)) throw new Error('--mode must
 const grid = values.batches.split(',').map(Number);
 const secondsCuts = values['seconds-cuts']?.split(',').map(cut => cut.split(':').map(Number));
 if (secondsCuts && (secondsCuts.length !== 3 || secondsCuts.some(cut => cut.length !== 2))) throw new Error('--seconds-cuts requires early,middle,late start:end pairs');
-const server = spawn(process.execPath, ['serve.mjs'], {
+const server = spawn(process.execPath, ['scripts/serve.mjs'], {
   cwd: root, env: { ...process.env, PORT: values.port }, stdio: ['ignore', 'pipe', 'pipe'],
 });
 let browser;

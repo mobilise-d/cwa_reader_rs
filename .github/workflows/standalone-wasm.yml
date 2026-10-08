@@ -47,10 +47,13 @@ jobs:
       - name: Compare browser File reads with native Python
         working-directory: wasm
         run: npm test
+      - name: Test installed npm tarball in a production consumer
+        working-directory: wasm
+        run: npm run test:package
       - name: Measure bounded File batch consumption
         working-directory: wasm
         run: |
-          node bench.mjs --input ../tests/reference_data/openmovement/example-610-steps.cwa \
+          node scripts/bench.mjs --input ../tests/reference_data/openmovement/example-610-steps.cwa \
             --output test-results/batch-metrics.json --alias public-fixture \
             --batches 64,256,1024 --repeats 1 --mode full
       - name: Upload browser bundle
@@ -61,11 +64,18 @@ jobs:
             wasm/pkg/
             wasm/example/
             wasm/Cargo.lock
-            wasm/bench.mjs
-            wasm/serve.mjs
+            wasm/scripts/bench.mjs
+            wasm/scripts/serve.mjs
             wasm/package.json
             wasm/package-lock.json
             docs/standalone-wasm.md
+      - name: Upload installable local npm package
+        uses: actions/upload-artifact@v4
+        with:
+          name: standalone-browser-npm
+          path: |
+            wasm/dist/*.tgz
+            wasm/dist/npm-pack.json
       - name: Upload browser results
         if: always()
         uses: actions/upload-artifact@v4
@@ -76,3 +86,4 @@ jobs:
             wasm/test-results/header-metrics.json
             wasm/test-results/recording-metrics.json
             wasm/test-results/batch-metrics.json
+            wasm/test-results/npm-consumer.json
