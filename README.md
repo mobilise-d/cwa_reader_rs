@@ -59,10 +59,17 @@ interface still requires its supplied input buffer; the File adapter loads only
 requested ranges. Full sample arrays and pandas DataFrames allocate the selected
 output even when input processing uses bounded batches.
 
-For example, read metadata directly from a selected file handle:
+The standalone build also produces an installable npm tarball in `wasm/dist/`.
+Download the tarball from CI or build it locally, then install it in your web app:
+
+```sh
+npm install ./mobilise-d-cwa-reader-0.4.0.tgz
+```
+
+Read metadata directly from a selected file handle:
 
 ```js
-import { readMetadataFromFile } from './pkg/cwa_reader_file.js';
+import { readMetadataFromFile } from '@mobilise-d/cwa-reader';
 
 const [handle] = await window.showOpenFilePicker();
 const metadata = await readMetadataFromFile(handle);
@@ -70,6 +77,9 @@ const metadata = await readMetadataFromFile(handle);
 
 The same function accepts a `File` from an HTML file input. It manages a worker
 and uses the core's seek-based metadata reader, as the Python adapter does.
+The byte API is available from `@mobilise-d/cwa-reader/bytes`. The tarball includes
+precompiled Wasm, worker code and TypeScript declarations; installation needs no
+Rust toolchain. It is distributed as a local package, without registry publication.
 
 Rust consumers use `CwaReader<R: Read + Seek>` from `cwa-core`. A `Cursor` over
 bytes supports every operation without a temporary file; CSV output accepts any

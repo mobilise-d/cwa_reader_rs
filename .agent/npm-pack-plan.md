@@ -59,3 +59,22 @@ top-level build.sh entry if useful, without compatibility forwarding stubs.
 Consolidate packaging helpers where that makes the build easier to follow.
 Update all consumers, commands and CI references and rerun the same source and
 installed-consumer checks after moving files.
+
+
+## Implementation evidence
+
+8b6074e implements the package and source layout. The runtime package has 11
+files, native ESM exports at the root and /bytes, and no runtime dependencies or
+install hooks. ./wasm/build.sh produces pkg/ and
+wasm/dist/mobilise-d-cwa-reader-0.4.0.tgz plus npm-pack.json. Its package version
+comes from root Cargo metadata. Three packaging helpers are consolidated into
+scripts/package.mjs; handwritten wrapper/type/worker sources are under js/.
+
+Pinned build, 18 existing browser tests, strict declarations, archive inspection
+and the moved benchmark smoke pass. npm run test:package installs the actual
+tarball offline into a temporary consumer and builds with Vite 8.3.4. The real
+browser loads worker and Wasm assets under /reader-test/ without custom asset
+configuration. Metadata matches native; the selected 840 sample rows have exact
+integer timestamps and acceleration. CI includes this check and uploads the
+standalone-browser-npm artifact. Final review, CI artifact proof and delivery
+remain pending. No parser behavior or native/Xeus build was changed.
