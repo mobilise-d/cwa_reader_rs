@@ -258,3 +258,21 @@ The clean f0d08d9 Xeus artifact passes 128 worker tests and 25 native comparison
 including recovered CSV. Updated packaging, current browser timings, the new
 scope range review from d029904, final CI/artifact inspection and PR delivery
 remain pending. Preserve the earlier final review and all correction commits.
+
+
+Final follow-up packaging and browser evidence is now available. A clean native
+wheel rebuilt from the f0d08d9 sdist passes all 128 tests and excludes fixtures;
+receipt /tmp/cwa-native-package-f0/results.json. Native CI37796677968 and Xeus
+CI37796678030 pass at f0d08d9. Standalone CI37797098964 passes all 18 tests at
+e0cfd62. Downloaded browser artifacts have verified source ancestry, checksums,
+required worker/module files and no recording fixtures; receipts under
+/tmp/cwa-followup-ci/{xeus,standalone}/acceptance.json.
+
+Optimized standalone default256 full-file medians are 2.5397 s raw and 6.5490 s
+at 60 Hz, using 1.75/4.625 MiB committed Wasm capacity while discarding output.
+Optimized Xeus default256 CSV median is 28.005 s over three repeats, with output
+discarded to /dev/null and no WORKERFS cache. All 18 freshly measured Xeus window
+outputs match native. The benchmark guide retains older five-size sweeps with
+explicit source labels and records these final optimized default measurements.
+All code and packaging criteria are satisfied. The new-scope final range review,
+its potential corrections and final PR delivery remain outstanding.
