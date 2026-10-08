@@ -210,3 +210,23 @@ JavaScript interface. readHeader over File.slice(0,1024) is bounded and omits
 actual sample bounds. Targeted Rust metadata access exists; a JavaScript File
 metadata facade is not exposed or claimed. Do not silently imply this example
 uses lazy metadata reads.
+
+The user now explicitly requires a direct File/FileSystemFileHandle JavaScript
+metadata interface. Standalone agent owns wasm and its guide. Reuse the same
+core seek-based metadata implementation as Python; do not buffer the whole file
+or duplicate packet-boundary search in JavaScript. A worker-local FileReaderSync
+Read+Seek adapter with an async File/handle facade is being evaluated as the
+smallest reuse. Keep byte APIs, support File/Blob and normalize handles once,
+and allow handles in existing sample/CSV batch facades. Real-browser proof must
+show native metadata parity, actual sample bounds, bounded requested ranges and
+no whole-file staging. Record final exported names and a working usage example.
+
+Completed simplifications so far:02636e0 Python option builder,7bd157a direct
+raw packet-to-column output,a402b96 decoder-derived timing seed without history
+rescan,9f01d92 borrowed resampler samples.26 Rust/128 native tests and31 preserved
+manifests pass. Interim full Python DataFrame median improved from1.648 s on the
+immediate baseline to0.819 s after direct raw output; history cleanup measured
+0.858 s within run variation. These are interim results, not the final combined
+measurement. Borrowed packet/prefix cleanup and direct-File metadata remain in
+progress; all affected native/browser artifacts and results need refresh after
+source stabilizes.
