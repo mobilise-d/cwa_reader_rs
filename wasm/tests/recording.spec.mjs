@@ -171,6 +171,39 @@ test('File iteration stops reads on cancellation and never refills insufficient 
   expect(result.insufficientReads.filter(([start, end]) => start >= 1024 && end - start >= 512)).toEqual([[1024, 1536]]);
 });
 
+test('File selections with no valid samples retain the full-byte error', async ({ page }) => {
+  await page.goto('/');
+  await expect(page.getByLabel('Select a CWA file')).toBeEnabled();
+  const results = await page.evaluate(async () => {
+    const { readCwaFileBatches } = await import('/pkg/cwa_reader_file.js');
+    const reader = await import('/pkg/cwa_reader_browser.js');
+    const original = new Uint8Array(await (await fetch('/fixture.cwa')).arrayBuffer());
+    const skipped = original.slice();
+    skipped[1024] = 0;
+    skipped[1025] = 0;
+    const cases = [
+      { bytes: skipped.slice(0, 1536), options: {} },
+      { bytes: skipped, options: { cut: reader.blocks(0, 1) } },
+    ];
+    const results = [];
+    for (const { bytes, options } of cases) {
+      let expected, actual;
+      try { reader.readCwaFile(bytes, options); } catch (error) { expected = error.message; }
+      let rows = 0;
+      try {
+        for await (const data of readCwaFileBatches(new File([bytes], 'skipped.cwa'), options)) rows += data.timestamps_us.length;
+      } catch (error) { actual = error.message; }
+      results.push({ expected, actual, rows });
+    }
+    return results;
+  });
+  for (const result of results) {
+    expect(result.expected).toContain('No valid sample data');
+    expect(result.actual).toBe(result.expected);
+    expect(result.rows).toBe(0);
+  }
+});
+
 test('File batch channel unions, cuts, offsets and packed layouts match all native cases', async ({ page }) => {
   test.setTimeout(120_000);
   await page.goto('/');

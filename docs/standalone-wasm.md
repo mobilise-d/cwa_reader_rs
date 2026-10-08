@@ -208,13 +208,14 @@ npx playwright install chromium
 CWA_NATIVE_PYTHON=/tmp/cwa-browser-native/bin/python npm test
 ```
 
-Thirteen actual Chromium tests compare full metadata/report fields and 31 sample/CSV
+Fourteen actual Chromium tests compare full metadata/report fields and 31 sample/CSV
 cases against the native Python package from the same checkout. Cases cover full
 reads, block/seconds cuts, resampling, channel flags, packed samples, 3/6/9-axis and
 mixed layouts, recorded zeros, missing values, fixed positive/negative/zero and
 fractional offsets, native error messages, and a real worker CSV download. An
 early worker load failure leaves header preview usable and full actions disabled.
-File tests additionally concatenate all 31 cases at different packet counts,
+File tests additionally reject skipped-only selections with the full-byte error,
+concatenate all 31 cases at different packet counts,
 check the exact global resampling grid across boundaries, compare CSV chunks,
 and verify cancellation, backpressure and structured insufficient-context errors.
 
