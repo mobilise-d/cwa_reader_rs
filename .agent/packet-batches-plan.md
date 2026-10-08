@@ -34,6 +34,21 @@ collect batches; CSV and incremental browser consumers use the same engine.
 Sampling consistency reports still inspect all packet metadata and should avoid
 one filesystem/browser call per 512-byte packet during their full scan.
 
+User clarification: packet times are ALWAYS ordered. This is the supported format
+contract. Replace the old full-file seconds-cut timing scan with estimated seek:
+use first valid sample origin and sampling rate/sample count to estimate a packet,
+probe timing, and correct by one or more pages according to the time error until
+the exact start/end packets are located. Keep a narrowing bracket/progress rule
+for poor estimates, varying packet sample counts and non-data pages. Do not build
+a file-wide index or fall back to full scans for hypothetical clock resets.
+Preserve exact cut origin, timestamp correction, end exclusion and context.
+Unvisited packets outside the selected region are not validated by a seconds cut;
+full sampling reports remain the operation that inspects all packet metadata.
+This replaces the earlier conservative seconds-planning implementation direction.
+Prove narrow early/middle/late cuts use few bytes/requests on the real multiday
+recording, with parity against the preserved baseline.
+
+
 ## Ownership and review units
 
 1. Core agent owns crates/cwa-core, Python adapters, relevant native tests and
