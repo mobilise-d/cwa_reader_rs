@@ -2,6 +2,7 @@ use crate::errors::CwaError;
 use chrono::{DateTime, LocalResult, TimeZone, Utc};
 use std::io::Read;
 
+#[derive(Debug, Clone, Copy)]
 pub(crate) struct PacketMeta {
     pub sample_count: usize,
     pub sample_rate: u8,
@@ -36,7 +37,7 @@ pub(crate) fn read_sector<R: Read>(reader: &mut R) -> Result<Option<[u8; 512]>, 
     Ok(Some(buffer))
 }
 
-pub(crate) fn packet_meta(buffer: &[u8; 512]) -> Result<Option<PacketMeta>, CwaError> {
+pub(crate) fn packet_meta(buffer: &[u8; 30]) -> Result<Option<PacketMeta>, CwaError> {
     if &buffer[..2] != b"AX" {
         return Ok(None);
     }

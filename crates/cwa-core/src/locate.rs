@@ -47,10 +47,8 @@ impl SecondsLocator {
     pub fn next_packet(&self) -> usize {
         self.next
     }
-    pub fn provide(&mut self, bytes: &[u8]) -> Result<Option<LocatedRange>, CwaError> {
-        let mut packet = [0u8; 512];
-        packet[..30].copy_from_slice(bytes);
-        let timing = packet_meta(&packet)?.map(|meta| {
+    pub fn provide(&mut self, bytes: &[u8; 30]) -> Result<Option<LocatedRange>, CwaError> {
+        let timing = packet_meta(bytes)?.map(|meta| {
             let (start, end) = meta.natural_bounds();
             Timing {
                 index: self.next,

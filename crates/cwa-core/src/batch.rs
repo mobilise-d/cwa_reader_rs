@@ -267,9 +267,8 @@ impl CwaBatchSession {
                 Ok(None)
             }
             Phase::Seed(index) => {
-                let mut buffer = [0; 512];
-                buffer[..30].copy_from_slice(bytes);
-                if let Some(meta) = packet_meta(&buffer)? {
+                let prefix = bytes.try_into().expect("complete packet timing prefix");
+                if let Some(meta) = packet_meta(prefix)? {
                     let end = meta.natural_bounds().1;
                     self.descriptor.previous_packet_end = Some(end);
                     self.phase = Phase::Payload;
@@ -287,7 +286,7 @@ impl CwaBatchSession {
                     .seconds
                     .as_mut()
                     .expect("seconds locator")
-                    .provide(bytes)?
+                    .provide(bytes.try_into().expect("complete packet timing prefix"))?
                 {
                     self.descriptor.selected_packets = located.packets;
                     self.descriptor.recording_origin_seconds = Some(located.origin);

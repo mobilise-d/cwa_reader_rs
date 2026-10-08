@@ -292,7 +292,7 @@ pub(crate) fn find_data_bounds_from_reader<R: Read + Seek>(
                 last_sample_us: None,
             });
         };
-        if let Some(meta) = packet_meta(&buffer)? {
+        if let Some(meta) = packet_meta(buffer.first_chunk().expect("complete sector prefix"))? {
             break meta;
         }
     };
@@ -306,7 +306,7 @@ pub(crate) fn find_data_bounds_from_reader<R: Read + Seek>(
         file.seek(SeekFrom::Start(position))?;
         let mut buffer = [0u8; 512];
         file.read_exact(&mut buffer)?;
-        let Some(meta) = packet_meta(&buffer)? else {
+        let Some(meta) = packet_meta(buffer.first_chunk().expect("complete sector prefix"))? else {
             continue;
         };
         if let Some(last) = last {
@@ -374,7 +374,8 @@ pub fn scan_data_timing_from_reader<R: Read>(
         }
         for packet in buffer[..filled].chunks_exact(512) {
             let buffer: &[u8; 512] = packet.try_into().expect("complete metadata packet");
-            let Some(meta) = packet_meta(buffer)? else {
+            let Some(meta) = packet_meta(buffer.first_chunk().expect("complete sector prefix"))?
+            else {
                 continue;
             };
             let (packet_first_us, packet_last_us) = sample_bounds_us(&meta, previous_packet_end);

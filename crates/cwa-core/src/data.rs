@@ -1,6 +1,5 @@
 use crate::errors::CwaError;
-use crate::packet::{cwa_timestamp, packet_meta, PacketMeta};
-use chrono::{DateTime, Utc};
+use crate::packet::{packet_meta, PacketMeta};
 use csv::WriterBuilder;
 use std::fmt::Write as _;
 
@@ -157,65 +156,27 @@ pub(crate) fn resolve_block_range(
     Ok((start_block, end_block))
 }
 
-/// CWA Data Block structure (512 bytes)
+/// A validated packet's metadata and borrowed sample payload.
 #[derive(Debug)]
-#[allow(dead_code)] // Some fields may be used for future functionality
-struct CwaDataBlock {
-    packet_header: String,    // @ 0  +2   ASCII "AX", little-endian (0x5841)
-    packet_length: u16,       // @ 2  +2   Packet length (508 bytes)
-    device_fractional: u16,   // @ 4  +2   Device ID or fractional timestamp
-    session_id: u32,          // @ 6  +4   Session identifier
-    sequence_id: u32,         // @10  +4   Sequence counter
-    timestamp: u32,           // @14  +4   RTC timestamp
-    light_scale: u16,         // @18  +2   Light sensor + accel/gyro scale info
-    temperature: u16,         // @20  +2   Temperature sensor value
-    events: u8,               // @22  +1   Event flags
-    battery: u8,              // @23  +1   Battery level
-    sample_rate: u8,          // @24  +1   Sample rate code
-    num_axes_bps: u8,         // @25  +1   Number of axes and packing format
-    timestamp_offset: i16,    // @26  +2   Timestamp offset
-    sample_count: u16,        // @28  +2   Number of samples
-    raw_sample_data: Vec<u8>, // @30  +480 Raw sample data
-    checksum: u16,            // @510 +2   Checksum
+struct CwaDataBlock<'a> {
+    timing: PacketMeta,
+    light_scale: u16,
+    temperature: u16,
+    battery: u8,
+    num_axes_bps: u8,
+    raw_sample_data: &'a [u8],
 }
 
-impl CwaDataBlock {
-    fn from_buffer(buffer: &[u8]) -> Result<Self, CwaError> {
-        if buffer.len() != 512 {
-            return Err("Data block must be exactly 512 bytes".into());
-        }
-
-        // Parse packet header
-        let packet_header =
-            std::str::from_utf8(&buffer[0..2]).map_err(|_| "Invalid packet header format")?;
-
-        if packet_header != "AX" {
-            return Err("Invalid data block header".into());
-        }
-
-        Ok(CwaDataBlock {
-            packet_header: packet_header.to_string(),
-            packet_length: u16::from_le_bytes([buffer[2], buffer[3]]),
-            device_fractional: u16::from_le_bytes([buffer[4], buffer[5]]),
-            session_id: u32::from_le_bytes([buffer[6], buffer[7], buffer[8], buffer[9]]),
-            sequence_id: u32::from_le_bytes([buffer[10], buffer[11], buffer[12], buffer[13]]),
-            timestamp: u32::from_le_bytes([buffer[14], buffer[15], buffer[16], buffer[17]]),
+impl<'a> CwaDataBlock<'a> {
+    fn from_buffer(buffer: &'a [u8; 512], timing: PacketMeta) -> Self {
+        Self {
+            timing,
             light_scale: u16::from_le_bytes([buffer[18], buffer[19]]),
             temperature: u16::from_le_bytes([buffer[20], buffer[21]]),
-            events: buffer[22],
             battery: buffer[23],
-            sample_rate: buffer[24],
             num_axes_bps: buffer[25],
-            timestamp_offset: i16::from_le_bytes([buffer[26], buffer[27]]),
-            sample_count: u16::from_le_bytes([buffer[28], buffer[29]]),
-            raw_sample_data: buffer[30..510].to_vec(),
-            checksum: u16::from_le_bytes([buffer[510], buffer[511]]),
-        })
-    }
-
-    /// Get the timestamp for this block
-    fn get_block_timestamp(&self) -> Option<DateTime<Utc>> {
-        cwa_timestamp(self.timestamp)
+            raw_sample_data: &buffer[30..510],
+        }
     }
 
     /// Get the number of axes (3=Axyz, 6=Gxyz/Axyz, 9=Gxyz/Axyz/Mxyz)
@@ -315,7 +276,7 @@ impl CwaDataBlock {
         &self,
         _options: &CwaParsingOptions,
     ) -> Result<Vec<SampleData>, CwaError> {
-        let sample_count = self.sample_count as usize;
+        let sample_count = self.timing.sample_count;
         let bytes_per_sample = 6; // 3 axes * 2 bytes each
         let accel_unit = self.get_accel_unit() as f32; // Java: accelUnit
 
@@ -366,7 +327,7 @@ impl CwaDataBlock {
         &self,
         _options: &CwaParsingOptions,
     ) -> Result<Vec<SampleData>, CwaError> {
-        let sample_count = self.sample_count as usize;
+        let sample_count = self.timing.sample_count;
         let bytes_per_sample = 4; // 1 packed 32-bit value per sample
         let accel_unit = self.get_accel_unit() as f32;
 
@@ -413,7 +374,7 @@ impl CwaDataBlock {
         &self,
         _options: &CwaParsingOptions,
     ) -> Result<Vec<SampleData>, CwaError> {
-        let sample_count = self.sample_count as usize;
+        let sample_count = self.timing.sample_count;
         let bytes_per_sample = 12; // 6 axes * 2 bytes each
         let accel_unit = self.get_accel_unit() as f32; // Java: accelUnit
         let (_, gyro_unit) = self.get_gyro_range_and_unit(); // Java: gyroUnit
@@ -482,7 +443,7 @@ impl CwaDataBlock {
         &self,
         options: &CwaParsingOptions,
     ) -> Result<Vec<SampleData>, CwaError> {
-        let sample_count = self.sample_count as usize;
+        let sample_count = self.timing.sample_count;
         let bytes_per_sample = 18; // 9 axes * 2 bytes each
         let accel_scale = self.get_accel_scale() as f32;
         let gyro_scale = self.get_gyro_scale().unwrap_or(2000.0) as f32 / 32768.0;
@@ -655,7 +616,7 @@ pub(crate) fn decode_loaded_batch(
             break;
         }
         let buffer: &[u8; 512] = packet.try_into().expect("complete packet");
-        let Some(meta) = packet_meta(buffer)? else {
+        let Some(meta) = packet_meta(buffer.first_chunk().expect("complete packet prefix"))? else {
             continue;
         };
         if index < plan.selected_packets.start {
@@ -665,7 +626,7 @@ pub(crate) fn decode_loaded_batch(
             }
             continue;
         }
-        let block = CwaDataBlock::from_buffer(buffer)?;
+        let block = CwaDataBlock::from_buffer(buffer, meta);
         let samples = block.parse_samples(options)?;
         let (timestamps, end) =
             calculate_sample_timestamps_with_prev_end(&block, samples.len(), previous_end)?;
@@ -1235,7 +1196,11 @@ fn calculate_sample_timestamps_with_prev_end(
         return Ok((Vec::new(), previous_packet_end.unwrap_or(0.0)));
     }
 
-    let (natural_t0, natural_t1) = natural_packet_bounds(data_block, sample_count)?;
+    let (natural_t0, natural_t1) = PacketMeta {
+        sample_count,
+        ..data_block.timing
+    }
+    .natural_bounds();
     let mut t0 = natural_t0;
     let t1 = natural_t1;
 
@@ -1254,22 +1219,6 @@ fn calculate_sample_timestamps_with_prev_end(
     }
 
     Ok((timestamps, t1))
-}
-
-fn natural_packet_bounds(
-    data_block: &CwaDataBlock,
-    sample_count: usize,
-) -> Result<(f64, f64), CwaError> {
-    if data_block.get_block_timestamp().is_none() {
-        return Err("Invalid block timestamp".into());
-    }
-    Ok(PacketMeta {
-        sample_count,
-        sample_rate: data_block.sample_rate,
-        timestamp: data_block.timestamp,
-        timestamp_offset: data_block.timestamp_offset,
-    }
-    .natural_bounds())
 }
 
 fn csv_header(options: &CwaParsingOptions, channels: SensorChannels) -> Vec<&'static str> {
@@ -1438,7 +1387,7 @@ pub(crate) fn format_csv_batch(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::TimeZone;
+    use chrono::{TimeZone, Utc};
 
     #[test]
     fn uploaded_bytes_decode_and_block_cuts_keep_full_read_timestamps() {
@@ -1556,22 +1505,17 @@ mod tests {
     #[test]
     fn timestamps_use_timestamp_offset_like_c_exporter() {
         let block = CwaDataBlock {
-            packet_header: "AX".to_string(),
-            packet_length: 508,
-            device_fractional: 0,
-            session_id: 1,
-            sequence_id: 1,
-            timestamp: encode_cwa_timestamp(2012, 3, 27, 11, 14, 58),
+            timing: PacketMeta {
+                sample_count: 120,
+                sample_rate: 0x4a,
+                timestamp: encode_cwa_timestamp(2012, 3, 27, 11, 14, 58),
+                timestamp_offset: 50,
+            },
             light_scale: 0,
             temperature: 0,
-            events: 0,
             battery: 0,
-            sample_rate: 0x4a,
             num_axes_bps: 0x32,
-            timestamp_offset: 50,
-            sample_count: 120,
-            raw_sample_data: vec![0; 480],
-            checksum: 0,
+            raw_sample_data: &[0; 480],
         };
 
         let timestamps = calculate_sample_timestamps(&block, 12).expect("timestamps");
@@ -1585,27 +1529,20 @@ mod tests {
         let packed = 0x9234_5678_u32;
         let (x, y, z) = c_decode_packed_axes(packed);
 
+        let mut payload = [0; 480];
+        payload[..4].copy_from_slice(&packed.to_le_bytes());
         let block = CwaDataBlock {
-            packet_header: "AX".to_string(),
-            packet_length: 508,
-            device_fractional: 0,
-            session_id: 1,
-            sequence_id: 1,
-            timestamp: encode_cwa_timestamp(2012, 3, 27, 11, 14, 58),
+            timing: PacketMeta {
+                sample_count: 1,
+                sample_rate: 0x4a,
+                timestamp: encode_cwa_timestamp(2012, 3, 27, 11, 14, 58),
+                timestamp_offset: 0,
+            },
             light_scale: 2 << 13,
             temperature: 0,
-            events: 0,
             battery: 0,
-            sample_rate: 0x4a,
             num_axes_bps: 0x30,
-            timestamp_offset: 0,
-            sample_count: 1,
-            raw_sample_data: {
-                let mut v = vec![0; 480];
-                v[0..4].copy_from_slice(&packed.to_le_bytes());
-                v
-            },
-            checksum: 0,
+            raw_sample_data: &payload,
         };
 
         let samples = block
@@ -1625,41 +1562,31 @@ mod tests {
     #[test]
     fn stream_timestamps_do_not_jump_backwards_between_adjacent_blocks() {
         let block1 = CwaDataBlock {
-            packet_header: "AX".to_string(),
-            packet_length: 508,
-            device_fractional: 0,
-            session_id: 1,
-            sequence_id: 1,
-            timestamp: encode_cwa_timestamp(2012, 1, 1, 0, 0, 1),
+            timing: PacketMeta {
+                sample_count: 100,
+                sample_rate: 0x4a,
+                timestamp: encode_cwa_timestamp(2012, 1, 1, 0, 0, 1),
+                timestamp_offset: 0,
+            },
             light_scale: 0,
             temperature: 0,
-            events: 0,
             battery: 0,
-            sample_rate: 0x4a,
             num_axes_bps: 0x32,
-            timestamp_offset: 0,
-            sample_count: 100,
-            raw_sample_data: vec![0; 480],
-            checksum: 0,
+            raw_sample_data: &[0; 480],
         };
 
         let block2 = CwaDataBlock {
-            packet_header: "AX".to_string(),
-            packet_length: 508,
-            device_fractional: 0,
-            session_id: 1,
-            sequence_id: 2,
-            timestamp: encode_cwa_timestamp(2012, 1, 1, 0, 0, 3),
+            timing: PacketMeta {
+                sample_count: 100,
+                sample_rate: 0x4a,
+                timestamp: encode_cwa_timestamp(2012, 1, 1, 0, 0, 3),
+                timestamp_offset: 150,
+            },
             light_scale: 0,
             temperature: 0,
-            events: 0,
             battery: 0,
-            sample_rate: 0x4a,
             num_axes_bps: 0x32,
-            timestamp_offset: 150,
-            sample_count: 100,
-            raw_sample_data: vec![0; 480],
-            checksum: 0,
+            raw_sample_data: &[0; 480],
         };
 
         let (ts1, end1) =
@@ -1673,41 +1600,31 @@ mod tests {
     #[test]
     fn seeding_with_previous_natural_end_matches_full_sequence_next_block() {
         let block1 = CwaDataBlock {
-            packet_header: "AX".to_string(),
-            packet_length: 508,
-            device_fractional: 0,
-            session_id: 1,
-            sequence_id: 1,
-            timestamp: encode_cwa_timestamp(2012, 1, 1, 0, 0, 1),
+            timing: PacketMeta {
+                sample_count: 120,
+                sample_rate: 0x4a,
+                timestamp: encode_cwa_timestamp(2012, 1, 1, 0, 0, 1),
+                timestamp_offset: 0,
+            },
             light_scale: 0,
             temperature: 0,
-            events: 0,
             battery: 0,
-            sample_rate: 0x4a,
             num_axes_bps: 0x32,
-            timestamp_offset: 0,
-            sample_count: 120,
-            raw_sample_data: vec![0; 480],
-            checksum: 0,
+            raw_sample_data: &[0; 480],
         };
 
         let block2 = CwaDataBlock {
-            packet_header: "AX".to_string(),
-            packet_length: 508,
-            device_fractional: 0,
-            session_id: 1,
-            sequence_id: 2,
-            timestamp: encode_cwa_timestamp(2012, 1, 1, 0, 0, 3),
+            timing: PacketMeta {
+                sample_count: 120,
+                sample_rate: 0x4a,
+                timestamp: encode_cwa_timestamp(2012, 1, 1, 0, 0, 3),
+                timestamp_offset: 150,
+            },
             light_scale: 0,
             temperature: 0,
-            events: 0,
             battery: 0,
-            sample_rate: 0x4a,
             num_axes_bps: 0x32,
-            timestamp_offset: 150,
-            sample_count: 120,
-            raw_sample_data: vec![0; 480],
-            checksum: 0,
+            raw_sample_data: &[0; 480],
         };
 
         let (_, full_end_1) =
@@ -1716,7 +1633,7 @@ mod tests {
             calculate_sample_timestamps_with_prev_end(&block2, 120, Some(full_end_1))
                 .expect("full block2");
 
-        let (_, natural_end_1) = natural_packet_bounds(&block1, 120).expect("natural bounds");
+        let (_, natural_end_1) = block1.timing.natural_bounds();
         let (seeded_ts_2, _) =
             calculate_sample_timestamps_with_prev_end(&block2, 120, Some(natural_end_1))
                 .expect("seeded block2");
