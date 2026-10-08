@@ -120,6 +120,7 @@ fn read_options(value: JsValue, csv: bool) -> Result<cwa_core::reader::CwaReadOp
         },
         resample,
         fixed_utc_offset_us,
+        batch: Default::default(),
     })
 }
 
