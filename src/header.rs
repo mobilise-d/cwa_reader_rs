@@ -252,7 +252,9 @@ pub fn scan_data_timing_from_reader<R: Read>(
 
         first_sample_us.get_or_insert(packet_first_us);
         last_sample_us = Some(packet_last_us);
-        sample_count_total += sample_count as u64;
+        sample_count_total = sample_count_total
+            .checked_add(sample_count as u64)
+            .ok_or("CWA sample count overflow")?;
         previous_packet_end = Some(natural_t1);
     }
 
