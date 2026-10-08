@@ -195,23 +195,6 @@ jobs:
         uses: actions/attest-build-provenance@v2
         with:
           subject-path: 'wheels-*/*'
-      - name: Publish to PyPI
-        uses: PyO3/maturin-action@v1
-        with:
-          command: upload
-          args: --non-interactive --skip-existing wheels-*/*
-
-  release-assets:
-    name: Attach native GitHub assets
-    if: ${{ github.event_name == 'release' }}
-    needs: [release]
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    steps:
-      - uses: actions/download-artifact@v4
-        with:
-          pattern: wheels-*
       - name: Check release versions and checksum native distributions
         env:
           RELEASE_TAG: ${{ github.event.release.tag_name }}
@@ -234,6 +217,33 @@ jobs:
               checksums.append(f'{hashlib.sha256(path.read_bytes()).hexdigest()}  {path.name}\n')
           Path(f'cwa_reader_rs-{version}-native-SHA256SUMS.txt').write_text(''.join(checksums))
           PY
+      - name: Publish to PyPI
+        uses: PyO3/maturin-action@v1
+        with:
+          command: upload
+          args: --non-interactive --skip-existing wheels-*/*
+      - uses: actions/upload-artifact@v4
+        with:
+          name: native-release-checksums
+          if-no-files-found: error
+          overwrite: true
+          path: cwa_reader_rs-*-native-SHA256SUMS.txt
+
+  release-assets:
+    name: Attach native GitHub assets
+    if: ${{ github.event_name == 'release' }}
+    needs: [release]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: wheels-*
+      - uses: actions/download-artifact@v4
+        with:
+          name: native-release-checksums
+          path: .
       - name: Attach native distributions to GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
