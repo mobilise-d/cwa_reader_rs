@@ -109,3 +109,21 @@ to provide a benchmark comparator. No merge is authorized.
 - Historical benchmark results shown; obsolete comparison/cache tooling removed.
 - Per-commit reviews closed; final range review from exact base above, no rewrite.
 - Branch pushed, PR updated/linked, CI artifacts checked; no publication.
+
+## Verification progress
+
+Core replacement 327f2b6 removes the old decode path. Browser constructor
+integration was corrected in e57b5c0. Ordered seconds seeking landed in a310cfa;
+2126651 fixes true-start linear context and 53d5ed1 compacts empty timing runs.
+The 31 preserved pre-refactor output manifests match exactly. At 53d5ed1,
+22 Rust tests and 128 native Python tests pass; a wheel built from the sdist
+passes all 128 tests in a clean environment. Packaging includes the core and
+excludes recording fixtures. Local receipt:
+/tmp/cwa-batch-package-acceptance/results.json.
+
+Historical native/Xeus cache benchmark results were shown to the user.
+3f43b57 removes the cache comparison mode, implementation and cache-specific tests.
+Historical receipts remain outside the repository. Current-reader measurements,
+standalone File adapter final integration, Xeus final artifact, final changeset
+review and final CI/artifact inspection remain outstanding. A measured native
+full-CSV regression is under investigation and must be reported or resolved.
