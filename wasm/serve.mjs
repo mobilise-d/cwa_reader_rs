@@ -13,9 +13,13 @@ http.createServer(async (request, response) => {
   let file;
   if (pathname === '/' || pathname === '/index.html') file = path.join(root, 'example/index.html');
   else if (pathname === '/inspect.js') file = path.join(root, 'example/inspect.js');
+  else if (pathname === '/reader-worker.js') file = path.join(root, 'example/reader-worker.js');
   else if (/^\/pkg\/[a-zA-Z0-9_.-]+$/.test(pathname)) file = path.join(root, pathname);
   else if (serveFixture && pathname === '/fixture.cwa') {
     file = path.join(root, '../tests/reference_data/openmovement/example-610-steps.cwa');
+  }
+  else if (serveFixture && /^\/test-data\/[a-zA-Z0-9_.-]+$/.test(pathname)) {
+    file = path.join(root, '.test-data', pathname.slice('/test-data/'.length));
   }
   if (!file) { response.writeHead(404).end('Not found'); return; }
   try {

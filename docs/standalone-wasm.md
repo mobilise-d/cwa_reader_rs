@@ -1,6 +1,6 @@
-# Standalone browser header reader
+# Standalone browser reader
 
-`wasm/` builds a browser module from the shared Rust parser with Python disabled.
+`wasm/` builds a browser module from the shared Rust core with Python disabled.
 It uses `wasm32-unknown-unknown`, Rust 1.90.0 and wasm-bindgen 0.2.129. This bundle
 is independent of the Xeus Python extension and its Emscripten ABI.
 
@@ -17,62 +17,119 @@ npm ci
 npm run dev
 ```
 
-Open `http://127.0.0.1:5287`. Select a CWA file to display its header metadata.
-The example does not send the recording to a server. It only fetches the JS and
-Wasm module. Serve `wasm/pkg/` with your application; the `.wasm` content type
-should be `application/wasm`. The generated JS, Wasm, type declarations, license
-and checksum/compiler manifest are in `wasm/pkg/`. The Rust and npm dependency
-locks live in `wasm/Cargo.lock` and `wasm/package-lock.json`.
+Open `http://127.0.0.1:5287`. File selection reads the first 1,024 bytes for a
+header preview. The buttons scan actual timing, decode the complete recording,
+or download CSV. Complete-file operations run in a module worker. No recording
+bytes are sent to a server or written to a virtual filesystem.
+
+The generated JS, Wasm, type declarations, license and checksum/compiler manifest
+are in `wasm/pkg/`. Serve them with your application; the `.wasm` content type
+should be `application/wasm`. Rust and npm dependency locks live in
+`wasm/Cargo.lock` and `wasm/package-lock.json`.
 
 ## Feed a browser file to Rust
 
 After your file input or drag-and-drop handler supplies a browser `File`:
 
 ```js
-import init, { readHeader } from './pkg/cwa_reader_browser.js';
+import init, {
+  readHeader, readMetadata, samplingConsistencyReport,
+  readCwaFile, writeCwaCsv, seconds, blocks,
+} from './pkg/cwa_reader_browser.js';
 
 await init();
-const headerBytes = new Uint8Array(await file.slice(0, 1024).arrayBuffer());
-const header = readHeader(headerBytes);
-console.log(header.device_id, header.sample_rate_hz, header.annotation);
+const header = readHeader(new Uint8Array(await file.slice(0, 1024).arrayBuffer()));
+const bytes = new Uint8Array(await file.arrayBuffer());
+const metadata = readMetadata(bytes);
+const report = samplingConsistencyReport(bytes);
+const data = readCwaFile(bytes, {
+  cut: seconds(1.2, 3.7),
+  resample_hz: 60,
+  include_light: false,
+  fixed_utc_offset_seconds: 19800,
+});
+console.log(data.timestamps_us[0], data.columns.acc_x, data.timezone);
+const csvBytes = writeCwaCsv(bytes, { cut: blocks(3, 10) });
+const csvText = new TextDecoder().decode(csvBytes);
+const csvBlob = new Blob([csvBytes], { type: 'text/csv' });
 
-// The same original File can then be uploaded to your existing endpoint.
+// The same original File can be uploaded to your existing endpoint.
 const form = new FormData();
 form.append('recording', file);
 // await fetch(yourUploadUrl, { method: 'POST', body: form });
 ```
 
-`readHeader(Uint8Array)` requires at least 1,024 bytes and ignores later bytes.
-Invalid or truncated metadata throws a JavaScript `Error`; callers can catch it
-and inspect another file using the same module.
+Use a worker for complete-file operations in an interactive application, as the
+example does. The parsing calls themselves are synchronous.
 
-The returned object uses the header fields from Python's `read_metadata`, including
-`logging_start_time_raw`, `logging_end_time_raw` and `last_change_time_raw`.
-These are naive device-clock strings, with `null` for missing values. They do
-not identify the recording's timezone. Other fields describe the device/session,
-annotation, nominal sample rate, acceleration range, and configured AX6 sensors.
+| Export | Input and result |
+| --- | --- |
+| `readHeader(bytes)` | At least 1,024 bytes; header configuration only. Additional bytes are ignored. |
+| `readMetadata(bytes)` | Complete CWA bytes; header fields plus actual first/last sample timing. |
+| `samplingConsistencyReport(bytes)` | Complete bytes; configured and data-derived duration/sample rates. |
+| `readCwaFile(bytes, options?)` | Complete bytes; selected timestamps and numeric channel arrays. |
+| `writeCwaCsv(bytes, options?)` | Complete bytes; CSV as `Uint8Array`. No output path is needed. |
+| `seconds(start?, end?)`, `blocks(start?, end?)` | Validated cut objects; start inclusive, end exclusive. |
 
-Header-only parsing omits `start_from_data_raw` and `end_from_data_raw`. Those
-fields in Python require a scan of data packets. A header preview cannot prove
-that a recording contains valid samples or establish its actual sample count,
-timing or measured channels. Decoding samples is not yet exported by this browser
-adapter. The shared Rust core accepts `Read + Seek` and bytes for a future sample
-adapter.
+Options use the same names as Python for channel flags, `resample_hz` and
+`resample_method`. Cubic resampling includes the existing linear edge behavior.
+Seconds cuts start relative to the first valid sample. Block cuts count 512-byte
+data packets after the header. Omitting `cut` reads the full recording.
+
+`readCwaFile` includes temperature, light and battery by default; `writeCwaCsv`
+omits these auxiliary columns by default. Magnetometer inclusion defaults to true
+in both. Gyro/magnetometer columns occur only when the selected samples contain
+those sensors. Real zero measurements remain zero; missing samples in a present
+channel are `NaN`, and absent channels have no property in `columns`.
+
+`fixed_utc_offset_seconds` replaces Python's fixed `datetime.timezone` object.
+It accepts a finite offset strictly inside +/-24 hours, rounded to microseconds
+with ties to even. The offset is subtracted from the device clock. Supplying it,
+including zero, makes `data.timezone` equal to `'UTC'`; omission gives `null` for
+naive time. It does not infer an IANA timezone or DST rules.
+
+## Timestamp and output precision
+
+`data.timestamps_us` is a JavaScript `BigInt64Array` containing exact signed
+integer microseconds, the core parser's native resolution. Do not convert these
+values to floating-point nanoseconds. To compare with a pandas nanosecond index,
+use `timestamp_us * 1000n`. This multiplication stays in JavaScript bigint space
+and does not require storing nanoseconds in a signed 64-bit array.
+
+Each property in `data.columns` is an owned `Float32Array`. These arrays remain
+valid after later Wasm calls or memory growth; they are copies rather than views
+into Wasm memory. Metadata/report fields use the same names as the Python API.
+Their `*_raw` timestamp strings preserve the naive device clock and missing
+values are `null`. `readHeader` omits `start_from_data_raw` and `end_from_data_raw`,
+which require data packets. A header preview cannot establish actual sample
+count, timing or measured channels.
+
+CSV preserves the native writer's formatting, including four decimal places for
+numeric `time` and six for channel values. CSV formatting therefore has lower
+timestamp precision than the sample arrays. Invalid input/options throw a
+JavaScript `Error`; callers can catch it and process another file with the same
+module.
 
 ## Copies and memory
 
-`Blob.slice` selects the header region. `arrayBuffer` materializes those 1,024
-bytes in JavaScript memory. wasm-bindgen copies the `Uint8Array` into Wasm linear
-memory to supply Rust's borrowed byte slice. The core reader allocates its header
-buffer, and conversion creates JavaScript strings and an object for the result.
-This is not zero-copy loading. No full recording buffer or sample DataFrame is
-needed by the selected-file example.
+The header preview selects a `Blob.slice` and materializes only 1,024 bytes in
+JavaScript. Complete operations materialize the full recording with
+`file.arrayBuffer()`. wasm-bindgen copies each input byte slice into Wasm linear
+memory. The Rust core borrows that copy through `Cursor`; it does not need a path,
+a temporary file, or a second whole-file input buffer.
 
-A future full-content API would need a separate memory and scheduling design.
-Passing a complete recording as a `Uint8Array` copies it into Wasm. Decoded arrays
-allocate additional memory, and synchronous parsing can block the UI. Large
-recordings should use a worker and a measured chunking strategy. Header-only
-measurements do not establish full-recording scalability.
+Decoding allocates selected sample columns in Rust. Returning them makes further
+copies into JavaScript typed arrays. CSV export accumulates the complete selected
+CSV in Rust and copies it into a JavaScript `Uint8Array`. The example transfers
+that array from its worker before creating the download Blob. Scanning metadata
+or a report avoids decoded sample columns but still copies the input bytes.
+
+This API is full-buffer input, not a lazy or constant-memory recording stream.
+The core decoder/resampler can process packets internally while its returned
+sample columns still allocate the selected recording. A small cut can reduce
+output size but does not reduce the full input copy. Very large recordings need
+measured input/output memory limits and a separate incremental browser adapter.
+A worker keeps parsing off the UI thread; it does not remove those allocations.
 
 ## Browser tests and measurements
 
@@ -80,34 +137,44 @@ Build the native package from the same checkout, then run:
 
 ```sh
 uv venv --python 3.13 /tmp/cwa-browser-native
-uv pip install --python /tmp/cwa-browser-native/bin/python .
+uv pip install --python /tmp/cwa-browser-native/bin/python . pytest
 cd wasm
 npm ci
 npx playwright install chromium
 CWA_NATIVE_PYTHON=/tmp/cwa-browser-native/bin/python npm test
 ```
 
-The tests select the real `example-610-steps.cwa` through a Chromium file input
-and compare every returned field directly with the native Python package.
-They also exercise truncated and malformed files, recovery with a valid file,
-missing times, AX6 sensor configuration and naive timestamps.
+Seven actual Chromium tests compare full metadata/report fields and 31 sample/CSV
+cases against the native Python package from the same checkout. Cases cover full
+reads, block/seconds cuts, resampling, channel flags, packed samples, 3/6/9-axis and
+mixed layouts, recorded zeros, missing values, fixed positive/negative/zero and
+fractional offsets, native error messages, and a real worker CSV download.
 
-Tests use the third-party fixture directly from the source checkout. Its source
-and redistribution limitation are recorded in
-`tests/reference_data/openmovement/README.md`. Neither the browser bundle nor CI
-artifacts include CWA fixtures. The local server exposes `/fixture.cwa` only with
-`--test-fixtures`; normal `npm run dev` does not expose it.
+Timestamps and raw sensor values compare exactly. Raw calibrated light uses a
+one-float32-ULP bound because `10_f32.powf(raw / 341)` uses different math runtimes
+on native and standalone Wasm. The observed maximum difference on this fixture
+was 0.000003814697265625, with relative difference at most 1.05e-7. Resampled
+columns allow `rtol=1e-6`, `atol=1e-6`, with identical NaN locations. CSV compares
+byte-for-byte except explicitly requested calibrated light, where the bound also
+allows 1e-6 for six-decimal printing; all other fields stay exact.
 
-`wasm/test-results/header-metrics.json` records the browser version, file size,
-header-read time, 1,000 parse calls, and Wasm linear memory before/after those
-calls. A local Chromium 156.0.8078.4 run on the 305,664-byte fixture read 1,024
-bytes in 1.1 ms and parsed that header 1,000 times in 18.6 ms. Wasm linear memory
-remained at 1,179,648 bytes. These are one-machine observations with coarse browser
-timer resolution, not performance guarantees. Linear memory size is not peak
-process memory or JavaScript heap usage. Initialization and file selection are
-outside the measured interval.
+Tests read the third-party `example-610-steps.cwa` directly from the source
+checkout and reuse existing channel fixture builders. Provenance and the
+redistribution limitation are in `tests/reference_data/openmovement/README.md`.
+Generated comparison inputs live in ignored `wasm/.test-data/`. Neither CWA
+fixtures, native arrays nor recovered CSV are bundled or uploaded as artifacts.
+The local server exposes test inputs only with `--test-fixtures`.
 
-The separate `Standalone browser WASM` workflow builds and tests the module and
-uploads `standalone-browser-wasm` plus test results. Artifact names do not match
-the native release workflow's `wheels-*/*` publication glob. Nothing is published
-to npm, PyPI or a conda channel by this workflow.
+`wasm/test-results/header-metrics.json` and `recording-metrics.json` record browser
+version, timings, selected output sizes and committed Wasm memory. These are
+machine-specific measurements with coarse browser timers, not performance
+promises. A local Chromium 156 run decoded the 305,664-byte fixture into 71,400
+rows and 2,284,800 bytes of returned arrays in 9.4 ms. The default CSV had
+3,099,794 bytes. Committed Wasm memory grew from 1,114,112 to 6,422,528 bytes after
+that read/export pair; the complete 31-case run ended at 11,272,192 bytes. Linear memory capacity is not peak process memory or JavaScript heap
+usage. Initialization and file selection are outside the parser timing interval.
+
+The separate `Standalone browser WASM` workflow builds/tests the module and
+uploads `standalone-browser-wasm` plus JSON test results. Artifact names do not
+match the native release workflow's `wheels-*/*` publication glob. Nothing is
+published to npm, PyPI or a conda channel by this workflow.

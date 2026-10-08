@@ -10,7 +10,7 @@ permissions:
   contents: read
 
 jobs:
-  browser-header:
+  browser-reader:
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
@@ -28,7 +28,7 @@ jobs:
       - name: Build native comparison package from this checkout
         run: |
           uv venv --python 3.13 /tmp/cwa-browser-native
-          uv pip install --python /tmp/cwa-browser-native/bin/python .
+          uv pip install --python /tmp/cwa-browser-native/bin/python . pytest
           echo 'CWA_NATIVE_PYTHON=/tmp/cwa-browser-native/bin/python' >> "$GITHUB_ENV"
       - name: Install matching Wasm binding generator
         run: cargo install wasm-bindgen-cli --version 0.2.129 --locked
@@ -61,3 +61,4 @@ jobs:
           path: |
             wasm/test-results/results.json
             wasm/test-results/header-metrics.json
+            wasm/test-results/recording-metrics.json
