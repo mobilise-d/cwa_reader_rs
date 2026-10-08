@@ -772,7 +772,7 @@ pub(crate) fn decode_loaded_batch(
                             "four original samples require more left context",
                         ));
                     }
-                    if left + 2 >= interpolator.samples.len() && !domain_end {
+                    if left > 0 && left + 2 >= interpolator.samples.len() && !domain_end {
                         return Err(plan.insufficient(
                             crate::errors::ContextSide::Right,
                             "four original samples require more right context",

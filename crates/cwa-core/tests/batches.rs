@@ -411,3 +411,34 @@ fn seconds_cuts_seek_to_a_narrow_window_in_a_large_recording() {
     assert_eq!(timestamps.first(), Some(&1_704_267_200_300_000));
     assert_eq!(timestamps.last(), Some(&1_704_267_260_280_000));
 }
+
+#[test]
+fn true_domain_start_needs_only_two_samples_for_its_linear_edge() {
+    use cwa_core::data::ResampleOptions;
+    let bytes = recording(6, 1);
+    let mut session = CwaBatchSession::new(
+        bytes.len() as u64,
+        CwaReadOptions {
+            resample: Some(ResampleOptions::parse(0.5, "cubic").unwrap()),
+            batch: BatchConfig {
+                packet_count: 1,
+                overlap_packets: 1,
+            },
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    while let Some(request) = session.request() {
+        if let Some(batch) = session
+            .provide(&bytes[request.offset as usize..request.offset as usize + request.length])
+            .unwrap()
+        {
+            // The first owned packet contributes only the true first target;
+            // interior cubic context in future batches is a separate requirement.
+            assert_eq!(batch.timestamps, vec![1_325_376_000_000_000]);
+            assert_eq!(batch.acc_x, vec![0.0]);
+            return;
+        }
+    }
+    panic!("first linear-edge target was not delivered");
+}
