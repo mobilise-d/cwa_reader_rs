@@ -5,18 +5,18 @@ description: Release cwa_reader_rs, a maturin-built Rust/Python package, through
 
 # Python Release Workflow
 
-Use this workflow for patch, minor, and major releases of `cwa_reader_rs`. The version comes from `Cargo.toml`; maturin supplies the Python package version. Publishing a GitHub Release triggers `.github/workflows/CI.yml` to build and upload the wheels and source archive to PyPI. A tag push alone does not publish.
+Use this workflow for patch, minor, and major releases of `cwa_reader_rs`. The version comes from `python/Cargo.toml`; maturin supplies the Python package version. Publishing a GitHub Release triggers `.github/workflows/CI.yml` to build and upload the wheels and source archive to PyPI. A tag push alone does not publish. Run the commands below from the repository root.
 
 ## Prepare and verify
 
 1. Check `git status -sb` and recent commits. Keep unrelated work out of the release changes.
-2. Choose the next version. Update the root package version in `Cargo.toml` and regenerate `Cargo.lock` so its `cwa_reader_rs` entry matches. Check that `pyproject.toml` still uses the dynamic version supplied by maturin.
-3. Run `cargo test`, `uv sync --dev --python 3.10`, `uv run --no-sync pytest -q tests`, and `uv build`. Resolve failures before proceeding.
+2. Choose the next version. Update the package version in `python/Cargo.toml` and regenerate the root `Cargo.lock` so its `cwa_reader_rs` entry matches. Check that `python/pyproject.toml` still uses the dynamic version supplied by maturin. The root `Cargo.toml` is only a workspace manifest.
+3. Run `cargo test --workspace`, `uv sync --project python --dev --python 3.10`, `uv run --project python --no-sync pytest -q python/tests`, and `uv build --project python --out-dir dist`. Resolve failures before proceeding.
 4. Commit the version change, push it, and merge it into `main` through the normal review process. Record the exact merged commit SHA. Wait for the `CI` workflow on that SHA to succeed; it tests Python 3.10 and 3.11 and builds the distribution artifacts.
 
 ## Publish
 
-1. Check that the planned tag `vX.Y.Z` and GitHub Release do not already exist, and that the merged commit has the intended version in both Cargo files.
+1. Check that the planned tag `vX.Y.Z` and GitHub Release do not already exist, and that the merged commit has the intended version in `python/Cargo.toml` and the root `Cargo.lock`.
 2. Create the GitHub Release for the tested commit, for example:
 
    ```bash
