@@ -194,3 +194,19 @@ context error found by the correction review is being fixed before performance
 work. Preserve all reviewed history and correction commits. After the new
 user-requested optimization/simplicity work, review its new range from d029904;
 this is new scope, not a repeat review merely for14240 corrections.
+
+The user subsequently authorized the simplicity reviewer to clean up all five
+findings. Core owns raw staging removal, decoder-derived timing seed/history
+removal and borrowed resampler storage. The reviewer owns Python option-builder
+consolidation and borrowed packet/metadata-prefix parsing after an explicit
+handoff of data.rs from core. No concurrent edits to shared decoder files.
+Preserve the existing CSV schema-discovery pass and format-specific arithmetic.
+Each finding needs a concrete disposition/commit and relevant parity proof.
+
+The user also requested JavaScript metadata usage. The current shown example is
+init + fileHandle.getFile() + readMetadata(Uint8Array(await file.arrayBuffer())).
+This is local and uses no upload/storage, but buffers the complete input at the
+JavaScript interface. readHeader over File.slice(0,1024) is bounded and omits
+actual sample bounds. Targeted Rust metadata access exists; a JavaScript File
+metadata facade is not exposed or claimed. Do not silently imply this example
+uses lazy metadata reads.
