@@ -150,3 +150,11 @@ module checksums and fixture exclusion verified under /tmp/cwa-batch-final-ci.
 Its synthetic PR-merge source da3e343 has parents main53830c8 and 84891bb.
 Final standalone CI/artifact check, remaining benchmark report, final review,
 updated PR and completion receipt remain pending.
+
+Latest requested measurement: compare the actual native Python read_cwa_file
+DataFrame interface against the preserved unbatched reader for the complete real
+recording and representative 24-hour seconds cuts. Streaming count/discard, CSV
+and short-window numbers are not substitutes. Use isolated sequential processes,
+same options/input, report rows/output parity, reader timing and peak RSS. Keep
+historical comparison scripts and receipts outside the repository; do not restore
+obsolete benchmark modes. These results must be shown to the user.
