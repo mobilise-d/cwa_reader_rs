@@ -43,7 +43,8 @@ base64 conversion or MEMFS staging is used. `--cache-bytes 1048576` enables a si
 shared aligned cache with the downstream bridge's read-ahead algorithm. Logical
 counters measure Rust filesystem calls; physical counters measure
 `FileReaderSync.readAsArrayBuffer` calls and returned bytes. Each case remounts the
-File and clears the cache. The kernel stays alive, including its grown allocator. Local OS file caches are
+File and clears the cache. Each workload releases its frame and arrays before returning. The kernel stays
+alive, including its grown allocator. Local OS file caches are
 not cleared; results are warm-storage measurements, not cold-disk latency.
 The wasm committed heap size is an allocation capacity, not live or peak memory.
 The optional cache is a JavaScript allocation outside that heap.
@@ -52,7 +53,8 @@ Use `--cases early,middle,late --resample-hz 60` for resampled windows;
 `--cases csv-sink --repeats 1` for bounded full-file output. Sweep
 `--batch-packets` over 64, 256, 1024, 2048 and 8192 once a package with tuning controls
 is installed. A reader error stops the run instead of falling back to another engine.
-A case exceeding `--timeout-seconds` records a lower bound and stops the run.
+A case exceeding `--timeout-seconds` records a bound on the entire kernel
+execution and stops the run. It does not claim a reader-only timing bound.
 Reader time covers only the operation. Metadata and end-to-end time are also
 recorded; end-to-end time includes metadata, conversion and output fingerprinting.
 The old reader collects full resampled CSV output in memory. Benchmark its full

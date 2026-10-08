@@ -9,7 +9,8 @@ for (const capacity of [0, 1024]) {
   const context = {
     Module:{FS:{mkdirTree(){},unmount(){},mount(){}}},
     WORKERFS:{reader:{readAsArrayBuffer:bytes=>bytes.buffer},stream_ops:{read(stream,buffer,offset,length,position){
-      const bytes=data.slice(position,position+length);buffer.set(bytes,offset);return bytes.length;
+      if (position >= stream.node.size) return 0;
+      const bytes=new Uint8Array(context.WORKERFS.reader.readAsArrayBuffer(file.slice(position,position+length)));buffer.set(bytes,offset);return bytes.length;
     }}}
   };
   vm.createContext(context);
@@ -28,6 +29,9 @@ for (const capacity of [0, 1024]) {
   const tail=new Uint8Array(8);
   read({node:{size:data.length,contents:file}},tail,0,8,3072);
   assert.deepEqual(tail,data.slice(3072,3080));
+  assert.equal(stats.physicalReadCalls,capacity?4:2);
+  assert.equal(read({node:{size:data.length,contents:file}},tail,0,8,data.length),0);
+  assert.equal(stats.logicalReadCalls,3);
   assert.equal(stats.physicalReadCalls,capacity?4:2);
   context.cwaBenchmarkFiles.mount([file]);
   assert.equal(context.cwaBenchmarkFiles.stats().logicalBytesRead,0);

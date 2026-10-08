@@ -31,11 +31,13 @@ args.report.parent.mkdir(parents=True, exist_ok=True)
 log = args.report.with_suffix('.server.log').open('w')
 server = subprocess.Popen([__import__('sys').executable, str(repo / 'tools/wasm/serve-runtime.py'), str(args.output), '--port', str(args.port)], stdout=log, stderr=log)
 results = []
+args.report.write_text('[]\n')
 receipt = args.output / 'artifact-manifest.json'
 metadata = {'reader_artifact':json.loads(receipt.read_text()) if receipt.exists() else None,
             'cache_bytes':args.cache_bytes, 'workerfs_sha256':__import__('hashlib').sha256(args.workerfs.read_bytes()).hexdigest(),
             'runner_python':__import__('sys').version, 'repeats':args.repeats,
-            'timeout_seconds':args.timeout_seconds}
+            'timeout_seconds':args.timeout_seconds,
+            'benchmark_tools_sha256':{p.name:__import__('hashlib').sha256(p.read_bytes()).hexdigest() for p in (repo/'tools/benchmarks').iterdir() if p.suffix in ('.py','.js','.mjs')}}
 # Keep the verbose tool/ABI receipt next to results, without input file paths.
 args.report.with_suffix('.metadata.json').write_text(json.dumps(metadata,indent=2))
 try:
@@ -68,7 +70,7 @@ try:
         }''')
         adapter = args.workerfs.read_text()
         meter = (repo / 'tools/benchmarks/workerfs-meter.js').read_text().replace('CWA_CACHE_BYTES', str(args.cache_bytes))
-        page.evaluate('code => window.cwaExecute(code)', 'import pyjs\npyjs.js.eval(' + repr(adapter) + ')\npyjs.js.eval(' + repr(meter) + ')')
+        page.evaluate('code => window.cwaExecute(code)', 'import pyjs,numpy as np,pandas as pd,json\npyjs.js.eval(' + repr(adapter) + ')\npyjs.js.eval(' + repr(meter) + ')')
         page.locator('#cwa-benchmark-input').set_input_files(str(args.file.resolve()))
         options = {}
         if args.batch_packets is not None:
@@ -79,15 +81,15 @@ try:
         for case in args.cases.split(','):
             for repeat in range(args.repeats):
                 page.evaluate("() => window.callGlobalReceiver('cwaBenchmarkFiles','mount', Array.from(document.getElementById('cwa-benchmark-input').files))")
-                code = "import numpy as np\n_heap_before=pyjs.buffer_to_js_typed_array(np.zeros(1,dtype=np.uint8),view=True).buffer.byteLength\n"
-                code += f"BENCH_PATH='/cwa-benchmark/recording.cwa'\nBENCH_CASE={case!r}\nBENCH_OPTIONS={options!r}\n" + workload
+                code = "import numpy as np,json\n_heap_before=pyjs.buffer_to_js_typed_array(np.zeros(1,dtype=np.uint8),view=True).buffer.byteLength\n"
+                code += f"_bench_scope={{'BENCH_PATH':'/cwa-benchmark/recording.cwa','BENCH_CASE':{case!r},'BENCH_OPTIONS':{options!r}}}\nexec({workload!r}, _bench_scope)\nBENCH_RESULT=_bench_scope['BENCH_RESULT']\ndel _bench_scope\n"
                 code += "\nBENCH_RESULT['wasm_committed_bytes_before']=int(_heap_before)\nBENCH_RESULT['wasm_committed_bytes_after']=int(pyjs.buffer_to_js_typed_array(np.zeros(1,dtype=np.uint8),view=True).buffer.byteLength)\nBENCH_RESULT['reads']=json.loads(str(pyjs.js.JSON.stringify(pyjs.js.cwaBenchmarkFiles.stats())))\nprint('CWA_BENCH_RESULT='+json.dumps(BENCH_RESULT))\n"
                 page.evaluate('code => {window.cwaPending={done:false}; window.cwaExecute(code).then(output=>{window.cwaPending={done:true,output};},error=>{window.cwaPending={done:true,error:String(error)};});}', code)
                 try:
                     page.wait_for_function('window.cwaPending.done', timeout=args.timeout_seconds * 1000)
                 except PlaywrightTimeoutError:
                     results.append({'case':case, 'repeat':repeat, 'options':options,
-                                    'status':'timeout', 'reader_seconds_lower_bound':args.timeout_seconds,
+                                    'status':'timeout', 'execution_seconds_lower_bound':args.timeout_seconds,
                                     'input_bytes':args.file.stat().st_size})
                     args.report.write_text(json.dumps(results, indent=2))
                     raise
@@ -103,6 +105,11 @@ try:
                 print(f"{case} repeat={repeat} seconds={result['reader_seconds']:.3f} physical_reads={result['reads']['physicalReadCalls']}", flush=True)
         page.evaluate('() => window.cwaKernel.shutdown()')
         browser.close()
+except Exception as error:
+    if not results or results[-1].get('status') != 'timeout':
+        results.append({'status':'failed', 'error':type(error).__name__})
+        args.report.write_text(json.dumps(results, indent=2))
+    raise
 finally:
     server.terminate()
     server.wait(timeout=10)
