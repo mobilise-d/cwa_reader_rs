@@ -22,7 +22,7 @@
     <button id="read" disabled>Read complete recording</button>
     <button id="csv" disabled>Export complete CSV</button>
   </p>
-  <p>These actions read the complete file into memory and process it in a worker. Results stay in this browser.</p>
+  <p>Sample decoding and CSV export read packet batches in a worker. The timing report loads the complete input, and a CSV download retains the complete output. Results stay in this browser.</p>
   <pre id="metadata" aria-label="Header metadata">No file selected.</pre>
   <p>The timestamp strings preserve the device clock. They contain no timezone. Header settings do not establish the actual sample start, end or number of samples.</p>
   <script type="module" src="/inspect.js"></script>

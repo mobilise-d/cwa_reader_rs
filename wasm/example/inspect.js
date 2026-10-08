@@ -33,13 +33,13 @@ worker.onmessage = ({ data }) => {
     return;
   }
   if (data.csv) {
-    const url = URL.createObjectURL(new Blob([data.csv], { type: 'text/csv' }));
+    const url = URL.createObjectURL(data.csv);
     const link = document.createElement('a');
     link.href = url;
     link.download = `${selectedFile.name.replace(/\.cwa$/i, '')}.csv`;
     link.click();
     setTimeout(() => URL.revokeObjectURL(url), 0);
-    status.textContent = `Exported ${data.csv.length.toLocaleString('en-US')} CSV bytes.`;
+    status.textContent = `Exported ${data.csv.size.toLocaleString('en-US')} CSV bytes.`;
   } else {
     output.textContent = JSON.stringify(data.result, null, 2);
     status.textContent = data.operation === 'read'

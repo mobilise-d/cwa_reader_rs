@@ -44,6 +44,12 @@ jobs:
       - name: Compare browser File reads with native Python
         working-directory: wasm
         run: npm test
+      - name: Measure bounded File batch consumption
+        working-directory: wasm
+        run: |
+          node bench.mjs --input ../tests/reference_data/openmovement/example-610-steps.cwa \
+            --output test-results/batch-metrics.json --alias public-fixture \
+            --batches 64,256,1024 --repeats 1 --mode full
       - name: Upload browser bundle
         uses: actions/upload-artifact@v4
         with:
@@ -52,6 +58,10 @@ jobs:
             wasm/pkg/
             wasm/example/
             wasm/Cargo.lock
+            wasm/bench.mjs
+            wasm/serve.mjs
+            wasm/package.json
+            wasm/package-lock.json
             docs/standalone-wasm.md
       - name: Upload browser results
         if: always()
@@ -62,3 +72,4 @@ jobs:
             wasm/test-results/results.json
             wasm/test-results/header-metrics.json
             wasm/test-results/recording-metrics.json
+            wasm/test-results/batch-metrics.json

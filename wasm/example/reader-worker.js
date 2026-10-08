@@ -1,4 +1,5 @@
-import init, { readMetadata, samplingConsistencyReport, readCwaFile, writeCwaCsv } from '/pkg/cwa_reader_browser.js';
+import init, { readMetadata, samplingConsistencyReport } from '/pkg/cwa_reader_browser.js';
+import { readCwaFileBatches, writeCwaCsvBatches } from '/pkg/cwa_reader_file.js';
 
 const initialized = init();
 initialized.then(
@@ -8,21 +9,37 @@ initialized.then(
 self.onmessage = async ({ data: { file, operation } }) => {
   try {
     await initialized;
-    const bytes = new Uint8Array(await file.arrayBuffer());
     if (operation === 'csv') {
-      const csv = writeCwaCsv(bytes);
-      self.postMessage({ csv }, [csv.buffer]);
+      const chunks = [];
+      for await (const chunk of writeCwaCsvBatches(file)) chunks.push(chunk);
+      const csv = new Blob(chunks, { type: 'text/csv' });
+      self.postMessage({ csv });
     } else if (operation === 'scan') {
+      const bytes = new Uint8Array(await file.arrayBuffer());
       self.postMessage({ operation, result: { metadata: readMetadata(bytes), sampling: samplingConsistencyReport(bytes) } });
     } else {
-      const data = readCwaFile(bytes);
+      let rows = 0, first, last, timezone = null;
+      const columns = new Set();
+      const first_samples = {};
+      for await (const data of readCwaFileBatches(file)) {
+        first ??= data.timestamps_us[0];
+        last = data.timestamps_us.at(-1) ?? last;
+        timezone = data.timezone;
+        for (const name of Object.keys(data.columns)) {
+          columns.add(name);
+          first_samples[name] ??= Array(Math.min(rows, 5)).fill(NaN);
+        }
+        for (const name of columns) {
+          const count = Math.min(5 - first_samples[name].length, data.timestamps_us.length);
+          first_samples[name].push(...(data.columns[name]?.slice(0, count) ?? Array(count).fill(NaN)));
+        }
+        rows += data.timestamps_us.length;
+      }
       self.postMessage({ operation, result: {
-        rows: data.timestamps_us.length,
-        timezone: data.timezone,
-        first_timestamp_us: data.timestamps_us[0]?.toString() ?? null,
-        last_timestamp_us: data.timestamps_us.at(-1)?.toString() ?? null,
-        columns: Object.keys(data.columns),
-        first_samples: Object.fromEntries(Object.entries(data.columns).map(([name, values]) => [name, Array.from(values.slice(0, 5))])),
+        rows, timezone,
+        first_timestamp_us: first?.toString() ?? null,
+        last_timestamp_us: last?.toString() ?? null,
+        columns: [...columns], first_samples,
       } });
     }
   } catch (error) {

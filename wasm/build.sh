@@ -11,6 +11,8 @@ cargo +1.90.0 build --locked --release --target wasm32-unknown-unknown --target-
 mkdir -p pkg
 wasm-bindgen target/wasm32-unknown-unknown/release/cwa_reader_browser.wasm \
   --target web --out-dir pkg --out-name cwa_reader_browser
+cp file-reader.js pkg/cwa_reader_file.js
+cp file-reader.d.ts pkg/cwa_reader_file.d.ts
 cp ../LICENSE pkg/LICENSE
 node build-metadata.mjs
 printf 'Browser bundle written to %s/pkg\n' "$wasm_dir"
