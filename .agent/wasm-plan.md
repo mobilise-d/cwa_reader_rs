@@ -1,6 +1,79 @@
 # Browser builds and parser separation
 
-Status: complete. This document records the accepted contract and validation receipt.
+Status: active follow-up. Separate cwa-core extraction committed; integrate PR #8 metadata optimization and finish browser validation.
+
+COMPACTION CONTINUITY: Re-read implement-code-change and the task-defining artifacts before continuing after compaction or session restoration.
+
+## Current follow-up contract
+
+Follow-up base: f731c97801c9b48208582b26aab7b9021a1e891f.
+The previous delivery exposed only header parsing in Wasm and left seconds-cut
+planning, resampling and CSV tied to paths. The user rejected that limitation.
+Complete byte-backed access for header metadata, full metadata/timing scan,
+sampling consistency report, full/block/seconds sample reads, resampling, channel
+flags, fixed offsets and CSV output. Generic Read+Seek/Write implementations must
+serve both path adapters and Cursor-backed bytes; no temporary file is needed.
+Parsing and report calculations belong in the Rust core, not Python or JS bridges.
+Preserve the native Python signatures and results. Keep header-only preview efficient;
+1,024 is the header length, not a cap on recording input. Browser output must preserve
+i64 timestamp precision, f32 columns, NaNs and absent-channel semantics.
+Do not claim that full-buffer byte input is lazy or constant-memory streaming.
+
+The user explicitly approved extracting `crates/cwa-core` after discussing the
+same-crate optional-Python design. The core must have no Python or JavaScript
+bridge dependencies. Root Python package and standalone Wasm adapter both depend
+on it. Keep local source builds, native wheel/sdist packaging, Xeus recipe source
+staging and standalone builds working without publishing the core crate.
+
+Completed follow-up commits: 8863c7b and a74feec. Generic reader operations and
+shared CwaReader pass 13 Rust tests with/without Python, 122 native Python tests,
+and wasm32 compilation. Reviews 14171/14172 passed and are closed.
+
+New explicit request: integrate https://github.com/mobilise-d/cwa_reader_rs/pull/8
+at source d1bd1f4510d5feeede21d14a0ae5ccca3938b90b. Port boundary lookup to generic
+Read+Seek in cwa-core after extraction. read_metadata searches first packet and
+last packet/predecessor; sampling_consistency_report retains its full scan and
+real sample count. Encountered malformed/truncated packets still error; unvisited
+interior corruption is intentionally not detected by metadata lookup. Preserve
+raw timestamps and continuity correction. Keep PR attribution in integration
+commit and PR description. Existing tests plus temporary boundary/I/O checks
+respect the source PR's explicit decision against new permanent coverage.
+
+Extraction a010ee0 passes 13 Rust tests, pure-core dependency/wasm checks,
+122 native tests and 122 installed-wheel tests. Sdist includes core source and
+license, excludes fixtures/binaries, and builds/installs in an isolated target.
+Packaging receipt: /tmp/cwa-core-package-acceptance/results.json.
+
+PR #8 port b50bb9a retains original source/author attribution. Validation: 13 Rust and 122 native Python tests pass, plus Rust 1.90
+wasm32 core check. Temporary checks match 201 boundary cases against full scans,
+including sample offsets, gaps/backward clocks, empty/skipped packets and the real
+fixture. A sparse 536,870,912-byte seekable input reads 2,560 bytes for metadata.
+Visited malformed boundaries and partial sectors error; unvisited interior
+corruption is skipped as explicitly requested by PR #8.
+
+Current review units, each with focused checks and a normal commit gate:
+1. Core worker: remove remaining filesystem dependencies from operations; add
+   meaningful in-memory/path parity; run default/no-default Rust and native tests.
+2. Standalone worker: expose all operations to JS bytes, demonstrate beyond-header
+   processing and CSV, validate actual browser/native parity; update own docs/CI.
+3. Core worker: extract crates/cwa-core, update Python imports/workspace and
+   prove Rust/native tests plus wheel/sdist inclusion and installation.
+4. Standalone worker: switch to direct cwa-core dependency and rerun browser parity.
+5. Xeus worker: update staging/build assumptions and run actual-worker regression
+   against the separate crate.
+6. Parent: docs/PR integration, source/packaging checks, per-commit review closure,
+   fresh browser artifacts, final review of this follow-up range and delivery.
+Previous reviewed commits remain immutable. No amend/autosquash/rebase into them.
+Standalone full-byte expansion f191065 passes seven Chromium tests and 31
+native recording cases. Direct cwa-core integration passes those tests again.
+Browser timestamps/raw recorded sensors compare exactly; computed light differs
+by at most one float32 ULP, and resampling uses 1e-6 tolerance. Review 14174 found
+an example worker-failure handling bug, corrected in ee2fae4 with a regression
+test. Eight browser tests now pass; reviews 14174 and 14181 are closed.
+Xeus receipts include nested core source hashes in f24d5d1; reviews 14179/14180
+passed and closed. Extraction review 14178 is resolved by that receipt update.
+All earlier artifacts and validation below are historical until refreshed.
+
 
 ## Contract and ownership
 
@@ -32,12 +105,12 @@ Optional downstream reference /tmp/mobgap-wasm/runtime was inspected read-only;
 reproduction does not require it. Downstream Numba/mobgap integration remains
 separate, needing participant metadata and a suitable real gyro recording.
 
-Local file selection does not upload or persist the recording. Standalone reads
-only a File slice. The pinned Xeus runtime lacks WORKERFS: the tested bridge
+Local file selection does not upload or persist the recording. Standalone header preview reads only a File slice; full operations read the
+selected File into bytes and run in a worker. The pinned Xeus runtime lacks WORKERFS: the tested bridge
 copies bytes into transient MEMFS. A lazy read-only local File filesystem adapter
 is feasible but not implemented. Do not claim zero-copy or all-day scalability.
-Full DataFrame results allocate the selected samples. Standalone sample decoding
-is optional future work; the delivered browser export parses headers only.
+Full DataFrame results allocate the selected samples. Standalone sample decoding is now required by the follow-up above. The initial
+delivery described below exposed headers only.
 
 ## Review units and verification
 
@@ -87,7 +160,7 @@ channels and C-reference comparisons. Only C CSV timestamp comparison retains
 its existing millisecond tolerance. Artifact uploads exclude fixtures, raw native
 comparison arrays, recovered CSV and the full test runtime.
 
-## Final artifacts and delivery
+## Previous delivery artifacts and evidence
 
 - Standalone local bundle: wasm/pkg; metrics: wasm/test-results/header-metrics.json.
   Final pin 0.2.129 produces 78,087-byte Wasm; measured 0.6ms header read/17.6 ms for 1,000 parses,
@@ -108,5 +181,5 @@ comparison arrays, recovered CSV and the full test runtime.
   reviewed stack. Branch pushed; PR7 linked to thread. No package publication.
 - Review14164 was a duplicate passing Xeus review, also inspected and closed;
   documentation review14167 passed and closed. No unresolved implementation reviews.
-- Standalone full-sample export, lazy Xeus File mounting and downstream mobgap
-  preset validation remain the explicit limits above, not unfinished delivery gates.
+- Lazy Xeus File mounting and downstream mobgap preset validation remain outside
+  this follow-up. Standalone full-sample export is now required.

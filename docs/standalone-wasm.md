@@ -124,8 +124,12 @@ a temporary file, or a second whole-file input buffer.
 Decoding allocates selected sample columns in Rust. Returning them makes further
 copies into JavaScript typed arrays. CSV export accumulates the complete selected
 CSV in Rust and copies it into a JavaScript `Uint8Array`. The example transfers
-that array from its worker before creating the download Blob. Scanning metadata
-or a report avoids decoded sample columns but still copies the input bytes.
+that array from its worker before creating the download Blob. Metadata lookup
+seeks the first and last usable packets and their needed predecessor; the
+sampling consistency report scans packet metadata throughout the recording.
+Neither operation allocates decoded sample columns, but both still copy the
+complete input bytes into Wasm. Metadata lookup does not validate unvisited
+interior packets; use decoding or the consistency report to inspect them.
 
 This API is full-buffer input, not a lazy or constant-memory recording stream.
 The core decoder/resampler can process packets internally while its returned
@@ -147,11 +151,12 @@ npx playwright install chromium
 CWA_NATIVE_PYTHON=/tmp/cwa-browser-native/bin/python npm test
 ```
 
-Seven actual Chromium tests compare full metadata/report fields and 31 sample/CSV
+Eight actual Chromium tests compare full metadata/report fields and 31 sample/CSV
 cases against the native Python package from the same checkout. Cases cover full
 reads, block/seconds cuts, resampling, channel flags, packed samples, 3/6/9-axis and
 mixed layouts, recorded zeros, missing values, fixed positive/negative/zero and
-fractional offsets, native error messages, and a real worker CSV download.
+fractional offsets, native error messages, and a real worker CSV download. An
+early worker load failure leaves header preview usable and full actions disabled.
 
 Timestamps and raw sensor values compare exactly. Raw calibrated light uses a
 one-float32-ULP bound because `10_f32.powf(raw / 341)` uses different math runtimes

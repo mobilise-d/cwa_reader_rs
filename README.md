@@ -37,20 +37,29 @@ Because this package contains a Rust extension module built with [maturin](https
 
 ### Browser builds
 
-The Rust parser is independent of the Python adapter. Two separate browser builds
-serve different callers:
+The shared Rust parser lives in the [`cwa-core`](crates/cwa-core) crate. The Python
+extension and standalone Wasm adapter depend on it. Two browser builds serve
+different callers:
 
-- [Standalone JavaScript/Wasm](docs/standalone-wasm.md) reads header metadata from
-  the first 1,024 bytes of a browser-selected local file. No upload or persistent
-  browser storage is needed.
+- [Standalone JavaScript/Wasm](docs/standalone-wasm.md) accepts bytes for header
+  preview, full metadata, sampling reports, sample reads, cuts, resampling and
+  CSV export. The example reads a browser-selected local file in a worker.
+  No upload or persistent browser storage is needed.
 - [Xeus-Python](docs/xeus-wasm.md) uses a locally built Emscripten Python extension
   and the existing Python API. The browser must first make the file available in
   the kernel worker's virtual filesystem, then pass its path to the reader.
 
 These artifacts have separate build commands and runtime requirements. A desktop
 Python wheel does not work in either browser environment. Header-only parsing
-also differs from `read_metadata()`, which scans data packets for actual sample
-start and end times.
+reads only the first 1,024 bytes. It differs from `read_metadata()`, which searches
+packet metadata from both ends for actual sample start and end times.
+`sampling_consistency_report()` scans all packet metadata. Full byte input and
+returned sample arrays consume memory proportional to the input and selected output.
+
+Rust consumers use `CwaReader<R: Read + Seek>` from `cwa-core`. A `Cursor` over
+bytes supports every operation without a temporary file; CSV output accepts any
+`Write` sink, including a byte vector. The core has no Python or JavaScript
+dependencies and does not need to be published separately to build either adapter.
 
 ## Usage
 
@@ -231,7 +240,7 @@ which can arrive after the configured `logging_start_local`. The header contains
 the scheduled start, not the measured first-sample time, and that scheduled value
 can be unset. Header information alone therefore does not determine the exact
 origin of a seconds cut. `read_metadata` also provides `start_from_data_raw` and
-`end_from_data_raw` by scanning packet metadata without decoding sample values.
+`end_from_data_raw` by searching packet metadata from both ends without decoding sample values.
 Use those measured timestamps to choose cuts without first loading all samples.
 
 Depending on your application, you may want to start 24-hour bouts at the
@@ -324,7 +333,9 @@ first_sample_raw = metadata["start_from_data_raw"]
 last_sample_raw = metadata["end_from_data_raw"]
 ```
 
-The metadata read parses the 1024-byte CWA header and scans packet metadata without decoding sensor values. It includes device and session identifiers (`hardware_type`, `device_id`, `session_id`), recording timing fields (`logging_start_time_raw`, `logging_end_time_raw`, `last_change_time_raw`), nominal sensor configuration (`sample_rate_hz`, `accel_range`, `gyro_range`, `magnetometer_enabled`, `firmware_revision`), and the free-form `annotation`. It also returns the first and last actual sample timestamps as `start_from_data_raw` and `end_from_data_raw`, including packet sample offsets and continuity correction. These can differ from the configured logging start/end and are `None` when no samples exist.
+The metadata read parses the 1024-byte CWA header, searches forward for the first data packet, and searches backward for the last data packet and its preceding data packet. It skips non-data and empty packets and does not decode sensor values or scan the recording interior. Errors in unvisited interior packets are not detected by this lookup; `sampling_consistency_report` still scans all packet metadata.
+
+Metadata includes device and session identifiers (`hardware_type`, `device_id`, `session_id`), recording timing fields (`logging_start_time_raw`, `logging_end_time_raw`, `last_change_time_raw`), nominal sensor configuration (`sample_rate_hz`, `accel_range`, `gyro_range`, `magnetometer_enabled`, `firmware_revision`), and the free-form `annotation`. It also returns the first and last actual sample timestamps as `start_from_data_raw` and `end_from_data_raw`, including packet sample offsets and continuity correction. These can differ from the configured logging start/end and are `None` when no samples exist.
 
 The `_raw` time fields are timezone-naive ISO 8601 strings when present, or `None`
 when unset. They decode the unaltered time values recorded by the sensor, without
