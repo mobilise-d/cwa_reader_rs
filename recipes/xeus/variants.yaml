@@ -1,0 +1,4 @@
+python:
+  - 3.13
+emscripten-abi:
+  - 4.0.9
