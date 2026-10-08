@@ -2,7 +2,7 @@
 
 Pass the adapted official WORKERFS backend from a compatible runtime. Neither the
 input recording nor its pathname is included in the report. Every case remounts
-its File so each cache starts empty; the kernel/allocator stays warm between cases.
+its File and resets counters; the kernel/allocator stays warm between cases.
 """
 import argparse
 import json

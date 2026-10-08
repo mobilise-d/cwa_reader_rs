@@ -132,32 +132,75 @@ data = cwa_reader_rs.read_cwa_file('/tmp/recording.cwa')
 ```
 
 This is transient memory storage; it does not inherently upload data to a remote
-server or persist it in IndexedDB/OPFS. A main-thread selected `File` needs an
-explicit worker transfer, or the JupyterLite contents filesystem integration.
-The pinned Xeus runtime exposes `pyjs._module.FS` but does **not** contain
-Emscripten WORKERFS. It cannot directly mount a DOM File using WORKERFS as shipped.
-A custom read-only filesystem backend using `FileReaderSync` on `File.slice()`
-in the worker could avoid copying the whole input file; that adapter is not part
-of this implementation. The standalone module can already parse selected File
-slices without a filesystem mount.
+server or persist it in IndexedDB/OPFS.
 
-The tested path copies input bytes through JavaScript and Python into MEMFS.
-The returned full DataFrame allocates all selected samples; streaming decoder
-internals do not make full reads constant-memory. Cuts reduce output allocation.
-No all-day recording scalability or zero-copy loading is claimed.
+A selected local `File` can also be read without staging its entire contents.
+The large-file benchmark passes the File through Xeus's main-thread
+`callGlobalReceiver` RPC to a worker object, then mounts it read-only with a
+compatible WORKERFS adapter. Rust opens the resulting worker path normally.
+WORKERFS uses `FileReaderSync` on `File.slice()` for the requested ranges; the
+packet engine requests bounded preloaded ranges. This requires no network upload
+and no persistent browser storage.
+
+The pinned Xeus runtime exposes `globalThis.Module.FS` inside the worker, but
+has no built-in WORKERFS backend. Load a compatible adapter before mounting.
+[The benchmark runner](../tools/benchmarks/xeus.py) accepts that adapter as an
+explicit file and demonstrates the complete File transfer/mount/read sequence.
+It neither modifies nor rebuilds the downstream runtime. The adapter is a runtime
+integration dependency, separate from the Python extension package.
+
+For example, after loading the adapted official WORKERFS source with
+`pyjs.js.eval(adapter_source)`, register a worker-side receiver:
+
+```python
+pyjs.js.eval("""
+globalThis.cwaLocalFiles = {
+  mount(files) {
+    const FS = globalThis.Module.FS;
+    FS.mkdirTree('/local-cwa');
+    FS.mount(globalThis.WORKERFS, {
+      blobs: [{name: 'recording.cwa', data: files[0]}]
+    }, '/local-cwa');
+  }
+};
+""")
+```
+
+The main-thread UI can then transfer its selected File, after the kernel and
+receiver are ready:
+
+```javascript
+await window.callGlobalReceiver('cwaLocalFiles', 'mount', [input.files[0]]);
+```
+
+Python reads `cwa_reader_rs.read_cwa_file('/local-cwa/recording.cwa')`. Unmount the
+old mount before replacing a selection. Directory selections can supply multiple
+Files; the application must map their relative names into worker paths.
+
+These reads still copy each requested slice into JavaScript and Wasm memory;
+this is not zero-copy decoding. The full DataFrame API retains every selected
+sample, and DataFrame/array conversions can add allocations. Cuts reduce that
+output. `write_cwa_csv` processes bounded batches, but a CSV written to MEMFS
+still retains its complete output there. An external streaming sink is required
+to avoid that storage cost. See [the batch benchmarks](packet-batch-benchmarks.md)
+for measured full-file bounded decoding and browser File access.
 
 ## Local measurements and limits
 
-On the real 305,664-byte OpenMovement fixture (71,400 rows, six float32 columns),
-a cached-runtime browser run returned a 2,284,800-byte DataFrame/index. Across the local T3 and headless Chromium runs, the median
-of six warm full reads ranged from 2.5 to 6.6 ms; first measured reads ranged
-from 12.2 to 26.5 ms. These timings include decoding and DataFrame construction and exclude
-runtime downloads and fixture transfer. The test ZIP transfer/extraction took
-about 29–40 ms. The worker's committed Wasm heap capacity was 139,198,464 bytes
-before and after full reads. This measures allocated linear-memory capacity,
-not peak live Rust/Python allocations; retained runtime/NumPy/pandas dominate it.
-Machine, browser caches and test work affect timing. Regenerate reports for the
-consumer's hardware and realistic file sizes.
+At source `8375b9b7119c0c2d5074c889ae55dd35e6358b5a`, a clean local Xeus
+artifact passed all 128 repository Python tests and 25 direct native/browser
+comparisons, including CSV recovery. On the real 305,664-byte OpenMovement
+fixture (71,400 rows, six float32 columns), the first full read took 13.4 ms and
+the median of six subsequent reads was 4.2 ms. The DataFrame/index occupied
+2,284,800 bytes. Fixture transfer/extraction took 34.2 ms. The committed Wasm
+heap capacity stayed at 139,198,464 bytes; this is allocation capacity rather
+than peak live Rust/Python memory. Runtime/NumPy/pandas allocations are included.
+Runtime downloads and fixture transfer are excluded from reader timing.
+
+The source-clean conda artifact SHA256 was
+`3bf96e832b01f283f3f301f9535554bb91b0a6bd8bbd174945dd425295f9649e`.
+Regenerate the artifact manifest and browser report on the consumer's hardware;
+these measurements are evidence for this pinned ABI and runtime.
 
 The ordinary accelerometer-only fixture cannot validate gyro-dependent mobgap
 presets. Synthetic fixtures validate channel handling, but downstream algorithm
