@@ -41,10 +41,10 @@ elapsed = time.perf_counter() - started
 read_peak_rss = peak_rss_bytes()
 # Hash outside reader timing with bounded temporary buffers. Do not materialize
 # a second full DataFrame or a full row-major values array.
-index = frame.index.as_unit('ns').asi8
 index_hash = hashlib.sha256()
 for offset in range(0, len(frame), 262144):
-    index_hash.update(index[offset:offset + 262144].tobytes())
+    index_chunk = frame.index[offset:offset + 262144].as_unit('ns').asi8
+    index_hash.update(index_chunk.tobytes())
 values_hash = {}
 for name in frame.columns:
     digest = hashlib.sha256()
