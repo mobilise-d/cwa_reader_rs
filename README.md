@@ -43,8 +43,9 @@ different callers:
 
 - [Standalone JavaScript/Wasm](docs/standalone-wasm.md) accepts bytes for header
   preview, full metadata, sampling reports, sample reads, cuts, resampling and
-  CSV export. The example reads a browser-selected local file in a worker.
-  No upload or persistent browser storage is needed.
+  CSV export. Its File adapter reads bounded packet batches from a selected
+  local file in a worker, including incremental CSV output. No upload or
+  persistent browser storage is needed.
 - [Xeus-Python](docs/xeus-wasm.md) uses a locally built Emscripten Python extension
   and the existing Python API. The browser must first make the file available in
   the kernel worker's virtual filesystem, then pass its path to the reader.
@@ -53,8 +54,10 @@ These artifacts have separate build commands and runtime requirements. A desktop
 Python wheel does not work in either browser environment. Header-only parsing
 reads only the first 1,024 bytes. It differs from `read_metadata()`, which searches
 packet metadata from both ends for actual sample start and end times.
-`sampling_consistency_report()` scans all packet metadata. Full byte input and
-returned sample arrays consume memory proportional to the input and selected output.
+`sampling_consistency_report()` scans all packet metadata. The byte-array
+interface still requires its supplied input buffer; the File adapter loads only
+requested ranges. Full sample arrays and pandas DataFrames allocate the selected
+output even when input processing uses bounded batches.
 
 Rust consumers use `CwaReader<R: Read + Seek>` from `cwa-core`. A `Cursor` over
 bytes supports every operation without a temporary file; CSV output accepts any
@@ -473,7 +476,9 @@ For combined cuts and resampling, the requested `seconds(...)` window is resolve
 
 #### Interpolation Details
 
-The resampler is streaming and currently supports `resample_method="cubic"` only.
+The resampler processes packet batches and currently supports
+`resample_method="cubic"` only. Every batch uses the same output sampling grid;
+batch boundaries do not reset interpolation.
 
 Output timestamps are generated as:
 
@@ -497,13 +502,51 @@ y(t) = y0 * L0(t) + y1 * L1(t) + y2 * L2(t) + y3 * L3(t)
 Lj(t) = product((t - xm) / (xj - xm) for m != j)
 ```
 
-This is a local cubic interpolation, not a global cubic spline. If a target timestamp is near the start or end of the available samples, or if the four-point polynomial is numerically degenerate because timestamps are duplicated or too close together, the implementation falls back to linear interpolation between the bracketing samples:
+This is a local cubic interpolation, not a global cubic spline. If a target timestamp is near the actual start or end of the selected input domain, or if the four-point polynomial is numerically degenerate because timestamps are duplicated or too close together, the implementation falls back to linear interpolation between the bracketing samples:
 
 ```text
 y(t) = y_left + (y_right - y_left) * (t - x_left) / (x_right - x_left)
 ```
 
 The resampler never extrapolates beyond the selected input samples. For `seconds(...)` cuts, neighboring blocks may be read as interpolation context, but emitted samples remain inside the requested time window.
+
+### Packet batches
+
+Data reads and CSV export use one packet-batch engine. `batch_packets` controls
+how many 512-byte data packets a batch owns; it does not specify a row count.
+`overlap_packets` adds that many physical packets on either side as interpolation
+context, clipped to the recording boundaries. Defaults are 256 and 1:
+
+```python
+data = read_cwa_file(
+    "recording.cwa",
+    cut=seconds(3600, 3660),
+    resample_hz=100,
+    batch_packets=256,
+    overlap_packets=1,
+)
+```
+
+`write_cwa_csv` accepts the same tuning keywords. Processing is sequential; this
+version does not start threads or processes. Each batch emits only its owned
+output, so overlap does not duplicate samples. If the preload does not contain
+enough valid context, Python raises a `RuntimeError` whose `code` attribute is
+`"InsufficientContext"`. It does not use linear interpolation at an artificial
+buffer boundary. Retry with a larger
+`overlap_packets` value. No additional payload pages are fetched automatically.
+
+Header and metadata operations request their required bytes separately. Seconds
+cuts assume ordered packet times: the locator estimates a packet position from
+sampling information, probes its timing and narrows the search to the exact cut
+boundaries. It does not scan or validate unvisited portions of the recording.
+Sampling consistency reports still inspect all packet metadata, using bulk reads.
+
+The Python data reader returns one complete DataFrame. CSV output and the
+[JavaScript File batch interface](docs/standalone-wasm.md) can release output as
+they proceed. Individual sample batches can have different optional channels;
+full reads combine them with missing values for absent segments. See the
+[benchmark tools and measurements](tools/benchmarks/README.md) for batch-size
+tradeoffs and reproduction commands.
 
 ### CSV Export
 
