@@ -2,9 +2,37 @@ import init, { PacketBatchReader } from './cwa_reader_browser.js';
 
 let initialized;
 
-async function* batches(file, options, csv) {
+async function fileOf(source) {
+  return typeof source.getFile === 'function' ? source.getFile() : source;
+}
+
+async function fileOperation(source, operation) {
+  const file = await fileOf(source);
+  const worker = new Worker(new URL('./cwa_reader_file_worker.js', import.meta.url), { type: 'module' });
+  try {
+    return await new Promise((resolve, reject) => {
+      worker.onmessage = ({ data }) => data.error ? reject(new Error(data.error)) : resolve(data.result);
+      worker.onerror = event => reject(new Error(event.message || 'CWA File worker failed to load'));
+      worker.onmessageerror = () => reject(new Error('CWA File worker response could not be read'));
+      worker.postMessage({ file, operation });
+    });
+  } finally { worker.terminate(); }
+}
+
+/** Read header settings from a File, Blob or file handle in a worker. */
+export function readHeaderFromFile(source) { return fileOperation(source, 'header'); }
+
+/** Read actual sample bounds using the core's targeted seek algorithm. */
+export function readMetadataFromFile(source) { return fileOperation(source, 'metadata'); }
+
+/** Scan packet metadata in bounded ranges without staging the complete File. */
+export function samplingConsistencyReportFromFile(source) { return fileOperation(source, 'report'); }
+
+async function* batches(source, options, csv) {
   const { signal, ...readOptions } = options;
   await (initialized ??= init());
+  signal?.throwIfAborted();
+  const file = await fileOf(source);
   signal?.throwIfAborted();
   const reader = new PacketBatchReader(file.size, csv, readOptions);
   try {

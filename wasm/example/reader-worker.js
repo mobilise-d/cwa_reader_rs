@@ -1,4 +1,4 @@
-import init, { readMetadata, samplingConsistencyReport } from '/pkg/cwa_reader_browser.js';
+import init, { readMetadataFromFileSync, samplingConsistencyReportFromFileSync } from '/pkg/cwa_reader_browser.js';
 import { readCwaFileBatches, writeCwaCsvBatches } from '/pkg/cwa_reader_file.js';
 
 const initialized = init();
@@ -15,8 +15,7 @@ self.onmessage = async ({ data: { file, operation } }) => {
       const csv = new Blob(chunks, { type: 'text/csv' });
       self.postMessage({ csv });
     } else if (operation === 'scan') {
-      const bytes = new Uint8Array(await file.arrayBuffer());
-      self.postMessage({ operation, result: { metadata: readMetadata(bytes), sampling: samplingConsistencyReport(bytes) } });
+      self.postMessage({ operation, result: { metadata: readMetadataFromFileSync(file), sampling: samplingConsistencyReportFromFileSync(file) } });
     } else {
       let rows = 0, first, last, timezone = null;
       const columns = new Set();

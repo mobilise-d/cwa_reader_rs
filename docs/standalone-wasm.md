@@ -21,9 +21,8 @@ npm run dev
 Open `http://127.0.0.1:5287`. File selection reads the first 1,024 bytes for a
 header preview. The buttons scan actual timing, decode the complete recording,
 or download CSV. Sample decoding and CSV input use packet batches in a module
-worker. The timing report materializes the complete input; a CSV download retains
-the complete output. No recording
-bytes are sent to a server or written to a virtual filesystem.
+worker. Metadata seeks to sample boundaries; the sampling report scans bounded
+input ranges. A CSV download retains the complete output. No recording bytes are sent to a server or written to a virtual filesystem.
 
 The generated JS, Wasm, type declarations, license and checksum/compiler manifest
 are in `wasm/pkg/`. Serve them with your application; the `.wasm` content type
@@ -34,7 +33,35 @@ toolchains.
 
 ## Feed a browser file to Rust
 
-After your file input or drag-and-drop handler supplies a browser `File`:
+After a file input or drag-and-drop handler supplies a browser `File`, or a
+picker supplies a `FileSystemFileHandle`, use the asynchronous File facade:
+
+```js
+import {
+  readHeaderFromFile, readMetadataFromFile, samplingConsistencyReportFromFile,
+  readCwaFileBatches, writeCwaCsvBatches,
+} from './pkg/cwa_reader_file.js';
+
+const header = await readHeaderFromFile(fileHandle); // Also accepts File or Blob.
+const metadata = await readMetadataFromFile(fileHandle);
+const report = await samplingConsistencyReportFromFile(fileHandle);
+for await (const data of readCwaFileBatches(fileHandle, { batchPackets: 256 })) {
+  await consumeSamples(data);
+}
+```
+
+Each operation resolves `handle.getFile()` once, preserving one File snapshot
+for its read. Metadata/header/report operations run in a dedicated module worker
+and release it on completion or error. Serve `cwa_reader_file_worker.js` alongside
+the generated module. Rust adapts that worker's `FileReaderSync` range reads to
+`Read + Seek`, then invokes the same `CwaReader` as Python. The metadata search
+reads the header and necessary first/last packet context; it does not materialize
+a complete File or duplicate the boundary algorithm in JavaScript. Skipped
+packets near a boundary can require additional probes. The sampling report
+intentionally scans all packet metadata in bounded ranges.
+
+The synchronous byte APIs remain available when you already have a complete
+input buffer:
 
 ```js
 import init, {
@@ -66,8 +93,11 @@ form.append('recording', file);
 // await fetch(yourUploadUrl, { method: 'POST', body: form });
 ```
 
-Use a worker for complete-file operations in an interactive application, as the
-example does. The parsing calls themselves are synchronous.
+The byte calls are synchronous. Run them in a worker for interactive applications.
+The example uses worker-only `readMetadataFromFileSync` and
+`samplingConsistencyReportFromFileSync` with its selected File; these bridge
+exports require a dedicated worker where `FileReaderSync` is available. The
+async File facade manages that worker for callers on the main thread.
 
 To consume a recording without materializing the complete `File`, import the
 separate browser source adapter. It drives the same core packet-batch decoder:
@@ -108,8 +138,11 @@ finishes; an already-started Blob read cannot be cancelled by this adapter.
 | `readCwaFile(bytes, options?)` | Complete bytes; selected timestamps and numeric channel arrays. |
 | `writeCwaCsv(bytes, options?)` | Complete bytes; CSV as `Uint8Array`. No output path is needed. |
 | `seconds(start?, end?)`, `blocks(start?, end?)` | Validated cut objects; start inclusive, end exclusive. |
-| `readCwaFileBatches(file, options?)` | Async iterator of selected `CwaSamples`, reading bounded File slices. |
-| `writeCwaCsvBatches(file, options?)` | Async iterator of CSV `Uint8Array` chunks, with one header. |
+| `readHeaderFromFile(source)` | File, Blob or file handle; Promise of header configuration, reading 1,024 bytes. |
+| `readMetadataFromFile(source)` | Same inputs; Promise of header fields and actual bounds from targeted reads. |
+| `samplingConsistencyReportFromFile(source)` | Same inputs; Promise of report, scanning bounded packet ranges. |
+| `readCwaFileBatches(source, options?)` | Async iterator of selected `CwaSamples`, reading bounded File slices. |
+| `writeCwaCsvBatches(source, options?)` | Async iterator of CSV `Uint8Array` chunks, with one header. |
 
 Options use the same names as Python for channel flags, `resample_hz` and
 `resample_method`. Cubic resampling includes the existing linear edge behavior.
@@ -170,7 +203,11 @@ module.
 
 ## Copies and memory
 
-The header preview materializes only 1,024 bytes. The File iterators keep input
+The header preview materializes only 1,024 bytes. File metadata keeps input to
+its requested boundary ranges; `FileReaderSync` creates one range ArrayBuffer
+which is copied into the Rust read buffer. File reports scan bounded ranges
+through that same adapter. They neither use MEMFS nor require SharedArrayBuffer.
+The File iterators keep input
 to requested ranges, including fixed overlap, and allocate one decoded output
 batch at a time in Rust. wasm-bindgen copies input bytes into Wasm; returned
 numeric arrays or CSV chunks are further owned JavaScript copies. Discarding
@@ -205,15 +242,20 @@ uv pip install --python /tmp/cwa-browser-native/bin/python . pytest
 cd wasm
 npm ci
 npx playwright install chromium
+npm run typecheck
 CWA_NATIVE_PYTHON=/tmp/cwa-browser-native/bin/python npm test
 ```
 
-Fifteen actual Chromium tests compare full metadata/report fields and 31 sample/CSV
+Eighteen actual Chromium tests compare full metadata/report fields and 31 sample/CSV
 cases against the native Python package from the same checkout. Cases cover full
 reads, block/seconds cuts, resampling, channel flags, packed samples, 3/6/9-axis and
 mixed layouts, recorded zeros, missing values, fixed positive/negative/zero and
 fractional offsets, native error messages, and a real worker CSV download. An
 early worker load failure leaves header preview usable and full actions disabled.
+File metadata/report tests use Files, Blobs and real file handles, compare native
+fields and errors, and resolve each handle once per operation. A 512 MiB sparse
+file in browser storage matches native metadata while worker instrumentation
+rejects complete-file buffering and measures less than 4 KiB of boundary reads.
 File tests additionally reject skipped-only selections with the full-byte error,
 concatenate all 31 cases at different packet counts,
 check the exact global resampling grid across boundaries, compare CSV chunks,

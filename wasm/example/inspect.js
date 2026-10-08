@@ -84,6 +84,6 @@ input.addEventListener('change', async () => {
 
 for (const button of actions) button.addEventListener('click', () => {
   busy(true);
-  status.textContent = `Reading complete file: ${selectedFile.name}...`;
+  status.textContent = `Reading recording: ${selectedFile.name}...`;
   worker.postMessage({ operation: button.id, file: selectedFile });
 });

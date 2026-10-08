@@ -41,6 +41,9 @@ jobs:
         run: |
           npm ci
           npx playwright install --with-deps chromium
+      - name: Check browser declarations
+        working-directory: wasm
+        run: npm run typecheck
       - name: Compare browser File reads with native Python
         working-directory: wasm
         run: npm test

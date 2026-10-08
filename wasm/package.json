@@ -4,9 +4,11 @@
   "type": "module",
   "scripts": {
     "dev": "node serve.mjs",
-    "test": "playwright test"
+    "test": "playwright test",
+    "typecheck": "tsc --noEmit --strict --lib ES2022,DOM,ESNext.Disposable --module ESNext --moduleResolution bundler pkg/cwa_reader_file.d.ts"
   },
   "devDependencies": {
-    "@playwright/test": "1.64.0"
+    "@playwright/test": "1.64.0",
+    "typescript": "5.9.3"
   }
 }

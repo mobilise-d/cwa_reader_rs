@@ -13,6 +13,7 @@ wasm-bindgen target/wasm32-unknown-unknown/release/cwa_reader_browser.wasm \
   --target web --out-dir pkg --out-name cwa_reader_browser
 cp file-reader.js pkg/cwa_reader_file.js
 cp file-reader.d.ts pkg/cwa_reader_file.d.ts
+cp file-worker.js pkg/cwa_reader_file_worker.js
 cp ../LICENSE pkg/LICENSE
 node build-metadata.mjs
 printf 'Browser bundle written to %s/pkg\n' "$wasm_dir"

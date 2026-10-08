@@ -92,6 +92,28 @@ manifest["short_interior_cut"] = {
     "columns": {name: values.tolist() for name, values in short_data.items()},
 }
 
+# Sparse disk fixture: valid first/last packets, a large untouched interior.
+# Only the edge bytes and native metadata are served to the browser test.
+sparse_size = 512 * 1024 * 1024
+sparse_path = out / "sparse-native.cwa"
+head = bytes(short_bytes[:1024])
+first = bytearray(short_bytes[1024:1536])
+penultimate = bytearray(first)
+last = bytearray(first)
+for packet, second in [(penultimate, 0), (last, 1)]:
+    struct.pack_into("<I", packet, 14, (12 << 26) | (1 << 22) | (2 << 17) | second)
+    struct.pack_into("<H", packet, 510, (-sum(struct.unpack("<255H", packet[:510]))) & 0xFFFF)
+with sparse_path.open("wb") as stream:
+    stream.write(head + first)
+    stream.seek(sparse_size - 1024)
+    stream.write(penultimate + last)
+(out / "sparse-head.bin").write_bytes(head + first)
+(out / "sparse-tail.bin").write_bytes(penultimate + last)
+manifest["sparse_metadata"] = {
+    "size": sparse_size, "metadata": reader.read_metadata(str(sparse_path)),
+    "head": "sparse-head.bin", "tail": "sparse-tail.bin",
+}
+
 errors = []
 for label, content, options in [
     ("truncated", fixture.read_bytes()[:1100], {}),

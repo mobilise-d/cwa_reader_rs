@@ -1,10 +1,12 @@
+mod file_source;
+
 use cwa_core::header::read_cwa_header_bytes;
 use serde::Serialize;
 use wasm_bindgen::prelude::*;
 
 /// Parse the first 1,024 bytes of a CWA file. Additional bytes are ignored.
 /// Returns header configuration only; actual sample timing needs data packets.
-#[wasm_bindgen(js_name = readHeader)]
+#[wasm_bindgen(js_name = readHeader, unchecked_return_type = "CwaHeader")]
 pub fn read_header(bytes: &[u8]) -> Result<JsValue, JsError> {
     let header = read_cwa_header_bytes(bytes).map_err(|error| JsError::new(&error.to_string()))?;
     js_metadata(&header)
@@ -62,7 +64,7 @@ fn core_error(error: cwa_core::errors::CwaError) -> JsError {
 }
 
 /// Read header configuration and actual sample start/end timing from CWA bytes.
-#[wasm_bindgen(js_name = readMetadata)]
+#[wasm_bindgen(js_name = readMetadata, unchecked_return_type = "CwaMetadata")]
 pub fn read_metadata(bytes: &[u8]) -> Result<JsValue, JsError> {
     let metadata = cwa_core::reader::CwaReader::new(std::io::Cursor::new(bytes))
         .read_metadata()
@@ -71,11 +73,38 @@ pub fn read_metadata(bytes: &[u8]) -> Result<JsValue, JsError> {
 }
 
 /// Compare configured timing and sampling rate with the data packets.
-#[wasm_bindgen(js_name = samplingConsistencyReport)]
+#[wasm_bindgen(js_name = samplingConsistencyReport, unchecked_return_type = "SamplingConsistencyReport")]
 pub fn sampling_consistency_report(bytes: &[u8]) -> Result<JsValue, JsError> {
     let report = cwa_core::reader::CwaReader::new(std::io::Cursor::new(bytes))
         .sampling_consistency_report()
         .map_err(|error| JsError::new(&error.to_string()))?;
+    js_metadata(&report)
+}
+
+/// Worker-only synchronous File/Blob header access; use the async File facade on the main thread.
+#[wasm_bindgen(js_name = readHeaderFromFileSync, unchecked_return_type = "CwaHeader")]
+pub fn read_header_from_file(file: web_sys::Blob) -> Result<JsValue, JsError> {
+    let header = file_source::reader(file)?
+        .read_header()
+        .map_err(core_error)?;
+    js_metadata(&header)
+}
+
+/// Worker-only seekable metadata access through the same CwaReader as Python.
+#[wasm_bindgen(js_name = readMetadataFromFileSync, unchecked_return_type = "CwaMetadata")]
+pub fn read_metadata_from_file(file: web_sys::Blob) -> Result<JsValue, JsError> {
+    let metadata = file_source::reader(file)?
+        .read_metadata()
+        .map_err(core_error)?;
+    js_metadata(&metadata)
+}
+
+/// Worker-only bounded full metadata scan, without materializing a complete input buffer.
+#[wasm_bindgen(js_name = samplingConsistencyReportFromFileSync, unchecked_return_type = "SamplingConsistencyReport")]
+pub fn sampling_consistency_report_from_file(file: web_sys::Blob) -> Result<JsValue, JsError> {
+    let report = file_source::reader(file)?
+        .sampling_consistency_report()
+        .map_err(core_error)?;
     js_metadata(&report)
 }
 
@@ -369,6 +398,39 @@ pub fn blocks(start: Option<f64>, end: Option<f64>) -> Result<JsValue, JsError> 
 
 #[wasm_bindgen(typescript_custom_section)]
 const TYPES: &'static str = r#"
+export interface CwaHeader {
+    packet_header: string;
+    packet_length: number;
+    hardware_type: string;
+    device_id: number;
+    session_id: number;
+    upper_device_id: number;
+    logging_start_time_raw: string | null;
+    logging_end_time_raw: string | null;
+    last_change_time_raw: string | null;
+    flash_led: number;
+    sensor_config: number;
+    sample_rate_hz: number;
+    accel_range: number;
+    firmware_revision: number;
+    annotation: string;
+    gyro_range: number | null;
+    magnetometer_enabled: boolean;
+}
+export interface CwaMetadata extends CwaHeader {
+    start_from_data_raw: string | null;
+    end_from_data_raw: string | null;
+}
+export interface SamplingConsistencyReport {
+    start_from_header_raw: string | null;
+    end_from_header_raw: string | null;
+    duration_s_from_header: number | null;
+    start_from_data_raw: string | null;
+    end_from_data_raw: string | null;
+    duration_s_from_data: number | null;
+    samplingrate_hz_from_header: number;
+    samplingrate_hz_from_data: number | null;
+}
 export type CwaCut =
     | { type: 'blocks'; start?: number | null; end?: number | null }
     | { type: 'seconds'; start?: number | null; end?: number | null };

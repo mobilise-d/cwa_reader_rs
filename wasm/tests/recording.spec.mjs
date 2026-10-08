@@ -25,6 +25,136 @@ test('full-file byte metadata and sampling report match native Python', async ({
   expect(actual.actual).toEqual(actual.expected);
 });
 
+test('File and file-handle metadata operations match native without staging input', async ({ page }) => {
+  await page.goto('/');
+  await expect(page.getByLabel('Select a CWA file')).toBeEnabled();
+  const result = await page.evaluate(async () => {
+    const api = await import('/pkg/cwa_reader_file.js');
+    const reader = await import('/pkg/cwa_reader_browser.js');
+    const content = await (await fetch('/fixture.cwa')).arrayBuffer();
+    const expected = await (await fetch('/test-data/expected.json')).json();
+    const file = new File([content], 'recording.cwa');
+    file.arrayBuffer = () => { throw new Error('whole-file staging'); };
+    const directory = await navigator.storage.getDirectory();
+    const handle = await directory.getFileHandle('metadata.cwa', { create: true });
+    const writer = await handle.createWritable();
+    await writer.write(content);
+    await writer.close();
+    const getFile = handle.getFile.bind(handle);
+    let calls = 0;
+    handle.getFile = () => { ++calls; return getFile(); };
+    try {
+      return { expected: { header: reader.readHeader(new Uint8Array(content)), metadata: expected.metadata, report: expected.report },
+        file: { header: await api.readHeaderFromFile(file), metadata: await api.readMetadataFromFile(file), report: await api.samplingConsistencyReportFromFile(file) },
+        handle: { header: await api.readHeaderFromFile(handle), metadata: await api.readMetadataFromFile(handle), report: await api.samplingConsistencyReportFromFile(handle) },
+        blob: await api.readMetadataFromFile(new Blob([content])), getFileCalls: calls };
+    } finally { await directory.removeEntry('metadata.cwa'); }
+  });
+  expect(result.file).toEqual(result.expected);
+  expect(result.handle).toEqual(result.expected);
+  expect(result.blob).toEqual(result.expected.metadata);
+  expect(result.getFileCalls).toBe(3);
+});
+
+test('seekable File metadata reads only native boundary ranges of a large sparse handle', async ({ page }) => {
+  await page.route('**/pkg/cwa_reader_file_worker.js', async route => {
+    const script = await (await route.fetch()).text();
+    const instrument = `
+      const ranges = [];
+      const slice = Blob.prototype.slice;
+      Blob.prototype.slice = function(start, end) { ranges.push([start, end]); return slice.call(this, start, end); };
+      File.prototype.arrayBuffer = Blob.prototype.arrayBuffer = () => { throw new Error('whole-file materialization'); };
+      const read = FileReaderSync.prototype.readAsArrayBuffer;
+      let bytesRead = 0;
+      FileReaderSync.prototype.readAsArrayBuffer = function(blob) {
+        if (blob.size > 1024) throw new Error('metadata read exceeded its necessary range');
+        bytesRead += blob.size;
+        return read.call(this, blob);
+      };
+      const post = self.postMessage.bind(self);
+      self.postMessage = data => post({ ...data, testReads: { ranges, bytesRead } });
+    `;
+    await route.fulfill({ contentType: 'text/javascript', body: instrument + script });
+  });
+  await page.goto('/');
+  await expect(page.getByLabel('Select a CWA file')).toBeEnabled();
+  const result = await page.evaluate(async () => {
+    const expected = (await (await fetch('/test-data/expected.json')).json()).sparse_metadata;
+    const directory = await navigator.storage.getDirectory();
+    const handle = await directory.getFileHandle('sparse.cwa', { create: true });
+    const writer = await handle.createWritable();
+    await writer.truncate(expected.size);
+    await writer.write({ type: 'write', position: 0, data: await (await fetch(`/test-data/${expected.head}`)).arrayBuffer() });
+    await writer.write({ type: 'write', position: expected.size - 1024, data: await (await fetch(`/test-data/${expected.tail}`)).arrayBuffer() });
+    await writer.close();
+    const workerReads = [];
+    const NativeWorker = Worker;
+    window.Worker = class extends NativeWorker {
+      constructor(...args) { super(...args); this.addEventListener('message', ({ data }) => workerReads.push(data.testReads)); }
+    };
+    const getFile = handle.getFile.bind(handle);
+    let calls = 0;
+    handle.getFile = () => { ++calls; return getFile(); };
+    try {
+      const { readMetadataFromFile } = await import('/pkg/cwa_reader_file.js');
+      const actual = await readMetadataFromFile(handle);
+      return { actual, expected: expected.metadata, size: expected.size, getFileCalls: calls, reads: workerReads[0] };
+    } finally { await directory.removeEntry('sparse.cwa'); }
+  });
+  expect(result.actual).toEqual(result.expected);
+  expect(result.getFileCalls).toBe(1);
+  expect(result.size).toBe(512 * 1024 * 1024);
+  expect(result.reads.bytesRead).toBeLessThan(4096);
+  expect(result.reads.ranges.some(([start]) => start > result.size - 1536)).toBe(true);
+});
+
+test('file handles feed sample and CSV batches once and metadata errors remain recoverable', async ({ page }) => {
+  await page.goto('/');
+  await expect(page.getByLabel('Select a CWA file')).toBeEnabled();
+  const result = await page.evaluate(async () => {
+    const api = await import('/pkg/cwa_reader_file.js');
+    const reader = await import('/pkg/cwa_reader_browser.js');
+    const content = await (await fetch('/fixture.cwa')).arrayBuffer();
+    const manifest = await (await fetch('/test-data/expected.json')).json();
+    const expected = manifest.cases.find(spec => spec.name === 'blocks');
+    const directory = await navigator.storage.getDirectory();
+    const handle = await directory.getFileHandle('batch-handle.cwa', { create: true });
+    const writer = await handle.createWritable();
+    await writer.write(content);
+    await writer.close();
+    const getFile = handle.getFile.bind(handle);
+    let calls = 0;
+    handle.getFile = () => { ++calls; return getFile(); };
+    const digest = async bytes => Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', bytes)), x => x.toString(16).padStart(2, '0')).join('');
+    try {
+      const timestamps = new BigInt64Array(expected.rows);
+      let rows = 0;
+      for await (const batch of api.readCwaFileBatches(handle, { ...expected.options, batchPackets: 3 })) {
+        timestamps.set(batch.timestamps_us, rows);
+        rows += batch.timestamps_us.length;
+      }
+      const chunks = [];
+      for await (const chunk of api.writeCwaCsvBatches(handle, { ...expected.options, batchPackets: 3 })) chunks.push(chunk);
+      const errors = [];
+      for (const bytes of [new Uint8Array(100), new Uint8Array(1536), new Uint8Array(content.slice(0, 1100))]) {
+        let native, file;
+        try { reader.readMetadata(bytes); } catch (error) { native = error.message; }
+        try { await api.readMetadataFromFile(new File([bytes], 'invalid.cwa')); } catch (error) { file = error.message; }
+        errors.push({ native, file });
+      }
+      const recovered = await api.readMetadataFromFile(handle);
+      return { rows, timestamps: await digest(timestamps), csv: await digest(await new Blob(chunks).arrayBuffer()),
+        expected, errors, recovered, metadata: manifest.metadata, getFileCalls: calls };
+    } finally { await directory.removeEntry('batch-handle.cwa'); }
+  });
+  expect(result.rows).toBe(result.expected.rows);
+  expect(result.timestamps).toBe(result.expected.timestamps_sha256);
+  expect(result.csv).toBe(result.expected.csv_sha256);
+  expect(result.getFileCalls).toBe(3);
+  for (const error of result.errors) { expect(error.native).toBeTruthy(); expect(error.file).toBe(error.native); }
+  expect(result.recovered).toEqual(result.metadata);
+});
+
 test('File packet batches preserve exact samples while reading only bounded slices', async ({ page }) => {
   await page.goto('/');
   await expect(page.getByLabel('Select a CWA file')).toBeEnabled();
