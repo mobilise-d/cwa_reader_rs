@@ -640,6 +640,11 @@ pub(crate) fn decode_loaded_batch(
     let mut source = Vec::new();
     let mut result = empty_result(options);
     let mut previous_end = plan.previous_packet_end;
+    let next_loaded_start = plan
+        .owned_packets
+        .end
+        .saturating_sub(plan.options.batch.overlap_packets);
+    let mut next_previous_packet_end = previous_end;
     let mut origin = plan.recording_origin_seconds;
     let mut first_domain = plan.first_domain_sample_us;
     let mut owned_first = None;
@@ -656,6 +661,9 @@ pub(crate) fn decode_loaded_batch(
         };
         if index < plan.selected_packets.start {
             previous_end = Some(meta.natural_bounds().1);
+            if index < next_loaded_start {
+                next_previous_packet_end = previous_end;
+            }
             continue;
         }
         let block = CwaDataBlock::from_buffer(buffer)?;
@@ -663,8 +671,8 @@ pub(crate) fn decode_loaded_batch(
         let (timestamps, end) =
             calculate_sample_timestamps_with_prev_end(&block, samples.len(), previous_end)?;
         previous_end = Some(end);
-        if index < plan.selected_packets.start {
-            continue;
+        if index < next_loaded_start {
+            next_previous_packet_end = previous_end;
         }
         origin.get_or_insert(timestamps[0] as f64 / 1_000_000.0);
         first_domain.get_or_insert(timestamps[0]);
@@ -829,6 +837,7 @@ pub(crate) fn decode_loaded_batch(
         recording_origin_seconds: origin,
         grid_origin_seconds: grid_origin,
         first_domain_sample_us: first_domain,
+        next_previous_packet_end,
     })
 }
 

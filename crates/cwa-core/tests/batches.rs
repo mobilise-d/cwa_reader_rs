@@ -652,3 +652,51 @@ fn one_sample_preload_reports_missing_right_bracket_before_emitting() {
     // the0ms target lies inside the true two-sample recording at25Hz.
     assert_eq!(timestamps, vec![1_325_376_000_000_000]);
 }
+
+#[test]
+fn batch_timing_seed_survives_empty_runs_and_overlap_larger_than_ownership() {
+    use cwa_core::{data::CutConfig, reader::CwaReader};
+    let mut bytes = recording(30, 50);
+    for packet in 0..30 {
+        let start = 1024 + packet * 512;
+        bytes[start + 26..start + 28].copy_from_slice(&((packet % 2 * 10) as i16).to_le_bytes());
+        if (8..16).contains(&packet) {
+            bytes[start..start + 2].copy_from_slice(b"ZZ");
+        }
+    }
+    let options = CwaReadOptions {
+        cut: CutConfig::Blocks {
+            start: Some(5),
+            end: Some(28),
+        },
+        batch: BatchConfig {
+            packet_count: 64,
+            overlap_packets: 0,
+        },
+        ..Default::default()
+    };
+    let expected = CwaReader::new(std::io::Cursor::new(&bytes))
+        .read_data(&options)
+        .unwrap();
+    for overlap_packets in [0, 1, 5, 20] {
+        let options = CwaReadOptions {
+            batch: BatchConfig {
+                packet_count: 2,
+                overlap_packets,
+            },
+            ..options.clone()
+        };
+        let mut session = CwaBatchSession::new(bytes.len() as u64, options).unwrap();
+        let mut timestamps = Vec::new();
+        let mut values = Vec::new();
+        while let Some(request) = session.request() {
+            let window = &bytes[request.offset as usize..request.offset as usize + request.length];
+            if let Some(output) = session.provide(window).unwrap() {
+                timestamps.extend(output.timestamps);
+                values.extend(output.acc_x);
+            }
+        }
+        assert_eq!(timestamps, expected.timestamps);
+        assert_eq!(values, expected.acc_x);
+    }
+}

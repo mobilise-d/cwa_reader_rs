@@ -3,7 +3,6 @@ use crate::data::{self, CutConfig, CwaDataResult};
 use crate::errors::CwaError;
 use crate::packet::packet_meta;
 use crate::reader::CwaReadOptions;
-use std::collections::VecDeque;
 use std::ops::Range;
 
 #[derive(Debug, Clone, Copy)]
@@ -60,6 +59,8 @@ pub struct BatchResult {
     pub recording_origin_seconds: Option<f64>,
     pub grid_origin_seconds: Option<f64>,
     pub first_domain_sample_us: Option<i64>,
+    /// Last valid natural packet end before the next batch's loaded window.
+    pub next_previous_packet_end: Option<f64>,
 }
 impl BatchDescriptor {
     pub(crate) fn insufficient(
@@ -100,7 +101,6 @@ pub struct CwaBatchSession {
     emitted_samples: bool,
     descriptor: BatchDescriptor,
     phase: Phase,
-    history: VecDeque<(usize, f64)>,
     seconds: Option<crate::locate::SecondsLocator>,
     csv: Option<CsvState>,
 }
@@ -154,7 +154,6 @@ impl CwaBatchSession {
                 options,
             },
             phase: Phase::Header,
-            history: VecDeque::new(),
             csv: None,
             seconds,
         })
@@ -198,7 +197,6 @@ impl CwaBatchSession {
                 .saturating_add(self.descriptor.options.batch.overlap_packets)
                 .min(self.total_packets);
         self.descriptor.previous_packet_end = None;
-        self.history.clear();
         self.phase = if self.descriptor.loaded_packets.start > self.first_valid_packet.unwrap_or(0)
         {
             Phase::Seed(self.descriptor.loaded_packets.start - 1)
@@ -274,7 +272,6 @@ impl CwaBatchSession {
                 if let Some(meta) = packet_meta(&buffer)? {
                     let end = meta.natural_bounds().1;
                     self.descriptor.previous_packet_end = Some(end);
-                    self.history.push_back((index, end));
                     self.phase = Phase::Payload;
                 } else {
                     self.phase = if index > 0 {
@@ -305,18 +302,6 @@ impl CwaBatchSession {
                 self.descriptor.recording_origin_seconds = result.recording_origin_seconds;
                 self.descriptor.grid_origin_seconds = result.grid_origin_seconds;
                 self.descriptor.first_domain_sample_us = result.first_domain_sample_us;
-                for (index, packet) in bytes.chunks_exact(512).enumerate() {
-                    let index = self.descriptor.loaded_packets.start + index;
-                    if index >= self.descriptor.selected_packets.end {
-                        break;
-                    }
-                    let buffer: &[u8; 512] = packet.try_into().expect("complete packet");
-                    if let Some(meta) = packet_meta(buffer)? {
-                        if self.history.back().is_none_or(|(last, _)| index > *last) {
-                            self.history.push_back((index, meta.natural_bounds().1));
-                        }
-                    }
-                }
                 let start = self.descriptor.owned_packets.end;
                 if start >= self.descriptor.selected_packets.end {
                     self.phase = Phase::Finished;
@@ -331,20 +316,7 @@ impl CwaBatchSession {
                         ..end
                             .saturating_add(self.descriptor.options.batch.overlap_packets)
                             .min(self.total_packets);
-                    self.descriptor.previous_packet_end = self
-                        .history
-                        .iter()
-                        .rev()
-                        .find(|(index, _)| *index < loaded_start)
-                        .map(|(_, end)| *end);
-                    while self.history.len() > 1
-                        && self
-                            .history
-                            .get(1)
-                            .is_some_and(|(index, _)| *index < loaded_start)
-                    {
-                        self.history.pop_front();
-                    }
+                    self.descriptor.previous_packet_end = result.next_previous_packet_end;
                     self.phase = Phase::Payload;
                 }
                 if let Some(csv) = self.csv.as_mut() {
