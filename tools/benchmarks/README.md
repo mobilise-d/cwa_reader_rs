@@ -62,3 +62,19 @@ Value hashes are exact checks for raw output; resampling comparisons require the
 separate numeric parity tests and their documented floating-point tolerance.
 
 Check the counter implementation with `node tools/benchmarks/workerfs-meter.test.mjs`.
+
+For native filesystem counts, run a separate instrumented case with strace. Its
+slow elapsed time must not enter the normal timing table. `-s 0` suppresses input
+and output values; `-P` restricts the log to the supplied recording and sink.
+
+```sh
+strace -s 0 -e trace=read,lseek,write -P /private/recording.cwa -P /dev/null \
+  -o /tmp/cwa-bench/native.strace \
+  /path/to/reader-env/bin/python tools/benchmarks/native.py \
+  /private/recording.cwa --case csv-sink --batch-packets 256
+python tools/benchmarks/native-syscalls.py /tmp/cwa-bench/native.strace
+```
+
+These are kernel read/write syscall counts, including short-read retry and EOF
+probes. They do not measure physical disk reads; the OS cache remains enabled.
+The parser handles the single-process `read`, `write` and `lseek` trace above.
