@@ -1,9 +1,9 @@
 use crate::errors;
-use crate::packet::{cwa_timestamp, packet_meta, read_sector};
+use crate::packet::{cwa_timestamp, packet_meta, read_sector, PacketMeta};
 use chrono::{DateTime, TimeZone, Utc};
 use serde::{Serialize, Serializer};
 use std::fs::File;
-use std::io::{Cursor, Read};
+use std::io::{Cursor, Read, Seek, SeekFrom};
 
 #[derive(Debug, Serialize, Clone, PartialEq)]
 pub struct CwaHeader {
@@ -205,6 +205,18 @@ pub fn read_cwa_header_from_reader<R: Read>(reader: &mut R) -> Result<CwaHeader,
     })
 }
 
+/// First and last observed samples, without a count of interior samples.
+#[derive(Debug, Clone, Copy, Serialize, PartialEq)]
+pub struct DataBounds {
+    #[serde(
+        rename = "start_from_data_raw",
+        serialize_with = "serialize_sample_time"
+    )]
+    pub first_sample_us: Option<i64>,
+    #[serde(rename = "end_from_data_raw", serialize_with = "serialize_sample_time")]
+    pub last_sample_us: Option<i64>,
+}
+
 #[derive(Debug, Clone, Copy, Serialize, PartialEq)]
 pub struct DataTimingSummary {
     #[serde(
@@ -245,6 +257,78 @@ pub fn timestamp_us_to_raw_string(timestamp_us: i64) -> Option<String> {
         .map(format_raw_time)
 }
 
+fn sample_bounds_us(meta: &PacketMeta, previous_packet_end: Option<f64>) -> (i64, i64) {
+    let (mut t0, t1) = meta.natural_bounds();
+    if let Some(last_end) = previous_packet_end {
+        if t0 - last_end < 1.0 {
+            t0 = last_end;
+        }
+    }
+    let step = (t1 - t0) / meta.sample_count as f64;
+    (
+        (t0 * 1_000_000.0) as i64,
+        ((t0 + (meta.sample_count - 1) as f64 * step) * 1_000_000.0) as i64,
+    )
+}
+
+/// Locate sample bounds after the caller has validated the CWA header.
+/// Only packets visited from either end are inspected, not the recording's interior.
+pub(crate) fn find_data_bounds_from_reader<R: Read + Seek>(
+    file: &mut R,
+) -> Result<DataBounds, errors::CwaError> {
+    let file_size = file.seek(SeekFrom::End(0))?;
+    if file_size < 1024 || (file_size - 1024) % 512 != 0 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::UnexpectedEof,
+            "Incomplete CWA sector",
+        )
+        .into());
+    }
+    file.seek(SeekFrom::Start(1024))?;
+    let first = loop {
+        let Some(buffer) = read_sector(file)? else {
+            return Ok(DataBounds {
+                first_sample_us: None,
+                last_sample_us: None,
+            });
+        };
+        if let Some(meta) = packet_meta(&buffer)? {
+            break meta;
+        }
+    };
+    let first_end_position = file.stream_position()?;
+    let first_sample_us = sample_bounds_us(&first, None).0;
+
+    let mut last = None;
+    let mut position = file_size;
+    while position > first_end_position {
+        position -= 512;
+        file.seek(SeekFrom::Start(position))?;
+        let mut buffer = [0u8; 512];
+        file.read_exact(&mut buffer)?;
+        let Some(meta) = packet_meta(&buffer)? else {
+            continue;
+        };
+        if let Some(last) = last {
+            return Ok(DataBounds {
+                first_sample_us: Some(first_sample_us),
+                last_sample_us: Some(sample_bounds_us(&last, Some(meta.natural_bounds().1)).1),
+            });
+        }
+        last = Some(meta);
+    }
+
+    // With two data packets the first is the predecessor; with one, no correction applies.
+    let last_sample_us = match last {
+        Some(last) => sample_bounds_us(&last, Some(first.natural_bounds().1)).1,
+        None => sample_bounds_us(&first, None).1,
+    };
+    Ok(DataBounds {
+        first_sample_us: Some(first_sample_us),
+        last_sample_us: Some(last_sample_us),
+    })
+}
+
 pub fn scan_data_timing(file_path: &str) -> Result<DataTimingSummary, errors::CwaError> {
     scan_data_timing_from_reader(&mut File::open(file_path)?)
 }
@@ -269,26 +353,14 @@ pub fn scan_data_timing_from_reader<R: Read>(
         let Some(meta) = packet_meta(&buffer)? else {
             continue;
         };
-        let (natural_t0, natural_t1) = meta.natural_bounds();
-        let sample_count = meta.sample_count;
-
-        let mut t0 = natural_t0;
-        if let Some(last_end) = previous_packet_end {
-            if t0 - last_end < 1.0 {
-                t0 = last_end;
-            }
-        }
-
-        let step = (natural_t1 - t0) / sample_count as f64;
-        let packet_first_us = (t0 * 1_000_000.0) as i64;
-        let packet_last_us = ((t0 + (sample_count - 1) as f64 * step) * 1_000_000.0) as i64;
+        let (packet_first_us, packet_last_us) = sample_bounds_us(&meta, previous_packet_end);
 
         first_sample_us.get_or_insert(packet_first_us);
         last_sample_us = Some(packet_last_us);
         sample_count_total = sample_count_total
-            .checked_add(sample_count as u64)
+            .checked_add(meta.sample_count as u64)
             .ok_or("CWA sample count overflow")?;
-        previous_packet_end = Some(natural_t1);
+        previous_packet_end = Some(meta.natural_bounds().1);
     }
 
     Ok(DataTimingSummary {

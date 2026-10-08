@@ -2,7 +2,7 @@
 use crate::data::{self, CutConfig, CwaDataResult, CwaParsingOptions, ResampleOptions};
 use crate::errors::CwaError;
 use crate::header::{
-    self, format_raw_time, timestamp_us_to_raw_string, CwaHeader, DataTimingSummary,
+    self, format_raw_time, timestamp_us_to_raw_string, CwaHeader, DataBounds, DataTimingSummary,
 };
 use serde::Serialize;
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -28,14 +28,14 @@ impl Default for CwaReadOptions {
     }
 }
 
-/// Header configuration plus observed sample timing. Serialization uses the
+/// Header configuration plus observed sample boundaries. Serialization uses the
 /// same raw naive timestamp fields as the Python metadata dictionary.
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct CwaMetadata {
     #[serde(flatten)]
     pub header: CwaHeader,
     #[serde(flatten)]
-    pub data_timing: DataTimingSummary,
+    pub data_bounds: DataBounds,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
@@ -50,43 +50,33 @@ pub struct SamplingConsistencyReport {
     pub samplingrate_hz_from_data: Option<f64>,
 }
 
-impl CwaMetadata {
-    pub fn sampling_consistency_report(&self) -> SamplingConsistencyReport {
-        let duration_s_from_header =
-            match (self.header.logging_start_time, self.header.logging_end_time) {
-                (Some(start), Some(end)) => {
-                    Some((end.timestamp_micros() - start.timestamp_micros()) as f64 / 1_000_000.0)
-                }
-                _ => None,
-            };
-        let duration_s_from_data = match (
-            self.data_timing.first_sample_us,
-            self.data_timing.last_sample_us,
-        ) {
+impl SamplingConsistencyReport {
+    fn from_timing(header: &CwaHeader, timing: &DataTimingSummary) -> Self {
+        let duration_s_from_header = match (header.logging_start_time, header.logging_end_time) {
+            (Some(start), Some(end)) => {
+                Some((end.timestamp_micros() - start.timestamp_micros()) as f64 / 1_000_000.0)
+            }
+            _ => None,
+        };
+        let duration_s_from_data = match (timing.first_sample_us, timing.last_sample_us) {
             (Some(start), Some(end)) => Some((end - start) as f64 / 1_000_000.0),
             _ => None,
         };
         let samplingrate_hz_from_data = duration_s_from_data.and_then(|duration| {
-            if self.data_timing.sample_count > 1 && duration > 0.0 {
-                Some((self.data_timing.sample_count - 1) as f64 / duration)
+            if timing.sample_count > 1 && duration > 0.0 {
+                Some((timing.sample_count - 1) as f64 / duration)
             } else {
                 None
             }
         });
         SamplingConsistencyReport {
-            start_from_header_raw: self.header.logging_start_time.map(format_raw_time),
-            end_from_header_raw: self.header.logging_end_time.map(format_raw_time),
+            start_from_header_raw: header.logging_start_time.map(format_raw_time),
+            end_from_header_raw: header.logging_end_time.map(format_raw_time),
             duration_s_from_header,
-            start_from_data_raw: self
-                .data_timing
-                .first_sample_us
-                .and_then(timestamp_us_to_raw_string),
-            end_from_data_raw: self
-                .data_timing
-                .last_sample_us
-                .and_then(timestamp_us_to_raw_string),
+            start_from_data_raw: timing.first_sample_us.and_then(timestamp_us_to_raw_string),
+            end_from_data_raw: timing.last_sample_us.and_then(timestamp_us_to_raw_string),
             duration_s_from_data,
-            samplingrate_hz_from_header: self.header.sample_rate_hz,
+            samplingrate_hz_from_header: header.sample_rate_hz,
             samplingrate_hz_from_data,
         }
     }
@@ -116,19 +106,22 @@ impl<R: Read + Seek> CwaReader<R> {
         header::read_cwa_header_from_reader(&mut self.input)
     }
 
-    /// Read header configuration and scan the complete input for sample timing.
+    /// Read header configuration and locate sample boundaries from both ends.
+    /// Unvisited interior packets are not validated; the sampling report scans all packets.
     pub fn read_metadata(&mut self) -> Result<CwaMetadata, CwaError> {
         let header = self.read_header()?;
-        self.input.seek(SeekFrom::Start(0))?;
-        let data_timing = header::scan_data_timing_from_reader(&mut self.input)?;
+        let data_bounds = header::find_data_bounds_from_reader(&mut self.input)?;
         Ok(CwaMetadata {
             header,
-            data_timing,
+            data_bounds,
         })
     }
 
     pub fn sampling_consistency_report(&mut self) -> Result<SamplingConsistencyReport, CwaError> {
-        Ok(self.read_metadata()?.sampling_consistency_report())
+        let header = self.read_header()?;
+        self.input.seek(SeekFrom::Start(0))?;
+        let timing = header::scan_data_timing_from_reader(&mut self.input)?;
+        Ok(SamplingConsistencyReport::from_timing(&header, &timing))
     }
 
     /// Write CSV to an arbitrary sink. Unresampled reads without seconds bounds
@@ -342,18 +335,17 @@ mod tests {
     }
 
     #[test]
-    fn metadata_and_sampling_report_scan_all_uploaded_packets() {
+    fn metadata_and_sampling_report_match_uploaded_packet_timing() {
         let bytes = recording();
         let mut reader = CwaReader::new(Cursor::new(bytes.as_slice()));
         let metadata = reader.read_metadata().expect("metadata from bytes");
         assert_eq!(metadata.header.device_id, 42);
-        assert_eq!(metadata.data_timing.sample_count, 200);
         assert_eq!(
-            metadata.data_timing.first_sample_us,
+            metadata.data_bounds.first_sample_us,
             Some(1_325_376_000_000_000)
         );
         assert_eq!(
-            metadata.data_timing.last_sample_us,
+            metadata.data_bounds.last_sample_us,
             Some(1_325_376_003_980_000)
         );
         let report = reader

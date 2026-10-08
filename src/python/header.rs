@@ -51,7 +51,7 @@ pub fn sampling_consistency_report(py: Python, file_path: &str) -> PyResult<Py<P
 }
 
 /// Read CWA header and sample timing metadata without timezone conversion.
-/// Scans packet metadata without decoding sensor values.
+/// Searches from both ends for sample bounds without decoding sensor values.
 /// `logging_start_time_raw`, `logging_end_time_raw`, and `last_change_time_raw`
 /// are naive ISO 8601 strings preserving the unaltered sensor clock values,
 /// or None when unset. Convert them to UTC or local time for most analysis.
@@ -66,7 +66,7 @@ pub fn read_metadata(py: Python, file_path: &str) -> PyResult<Py<PyAny>> {
         .and_then(|mut reader| reader.read_metadata())
         .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
     let header = metadata.header;
-    let data = metadata.data_timing;
+    let data = metadata.data_bounds;
     let header_dict = pyo3::types::PyDict::new(py);
 
     // Header identification
