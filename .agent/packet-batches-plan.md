@@ -90,6 +90,13 @@ Record input size/duration/channel layout, exact source/tool versions, repeats,
 read calls/bytes, timings, output size and memory metric definitions. Establish a
 measured default, report unsupported sizes/overlap failures and limitations.
 
+User cleanup requirement: show historical benchmark comparisons before removing
+their repository tooling. Preserve receipts outside the repository. Before the PR
+is ready, remove benchmarks/tests for obsolete solutions, including the downstream
+WORKERFS cache, and baseline-comparison modes. Retain useful current-reader
+batch-size measurements and correctness tests. Do not retain a legacy reader just
+to provide a benchmark comparator. No merge is authorized.
+
 ## Completion gates
 
 - One production packet-batch data engine, old reader path removed.
@@ -99,5 +106,6 @@ measured default, report unsupported sizes/overlap failures and limitations.
 - Actual Xeus build/browser parity and WORKERFS performance evidence.
 - Standalone File batching reads bounded slices without whole-file staging.
 - Reproducible native/Wasm batch-size benchmark with real multiday recording.
+- Historical benchmark results shown; obsolete comparison/cache tooling removed.
 - Per-commit reviews closed; final range review from exact base above, no rewrite.
 - Branch pushed, PR updated/linked, CI artifacts checked; no publication.
