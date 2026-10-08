@@ -1,6 +1,6 @@
 # Packet-batched reader
 
-Status: implementation. Base a686c45c4f362ed73aa404d16799e0cd2bf9cf98.
+Status: final verification and review. Base a686c45c4f362ed73aa404d16799e0cd2bf9cf98.
 PR https://github.com/mobilise-d/cwa_reader_rs/pull/7 remains the delivery PR.
 All previously reviewed history is immutable; use normal new commits.
 
@@ -127,3 +127,26 @@ Historical receipts remain outside the repository. Current-reader measurements,
 standalone File adapter final integration, Xeus final artifact, final changeset
 review and final CI/artifact inspection remain outstanding. A measured native
 full-CSV regression is under investigation and must be reported or resolved.
+
+Core source is complete through 8375b9b; standalone integration through 84891bb.
+Final core has 23 Rust tests and 128 native tests passing, including a fresh
+sdist-built installed wheel. Standalone has 14 browser tests and 12 private
+native cut/CSV comparisons passing. Final clean Xeus artifact at 8375b9b passed
+25 direct comparisons, 128 Python tests in the worker and recovered CSV parity.
+All implementation reviews through 84891bb are closed. History stays immutable;
+no fixup/squash commits remain. Final whole-range review may proceed while the
+last quiet benchmark runs and measured-results documentation finish. These must
+still be delivered before completion.
+
+Standalone quiet full-recording medians at 256 packets: raw 5.5834 s, 60 Hz
+10.3982 s; committed Wasm capacity 4.375 MiB, output discarded. Five sizes
+64/256/1024/2048/8192 were measured with three repeats. Real input is 436,792,320
+bytes. Native CSV follow-up quiet pair: old 16.895 s, new 17.431 s; this is one
+pair, not a three-repeat median. The shared CSV schema pass decodes batches.
+Do not report the earlier contended CSV timings as a regression measurement.
+
+CI at 84891bb passed native and Xeus. Xeus artifact was downloaded and package/
+module checksums and fixture exclusion verified under /tmp/cwa-batch-final-ci.
+Its synthetic PR-merge source da3e343 has parents main53830c8 and 84891bb.
+Final standalone CI/artifact check, remaining benchmark report, final review,
+updated PR and completion receipt remain pending.
