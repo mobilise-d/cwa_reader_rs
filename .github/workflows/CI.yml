@@ -32,14 +32,14 @@ jobs:
           python-version: ${{ matrix.python-version }}
       - uses: astral-sh/setup-uv@v4
       - name: Install dev dependencies
-        run: uv sync --dev --python ${{ matrix.python-version }}
+        run: uv sync --project python --dev --python ${{ matrix.python-version }}
       - name: Run Rust tests
-        run: cargo test
+        run: cargo test --workspace
       - name: Run Python tests
-        run: uv run --no-sync pytest -q tests
+        run: uv run --project python --no-sync pytest -q python/tests
       - name: Test wheel in a clean environment
         run: |
-          uv build --wheel --out-dir dist
+          uv build --project python --wheel --out-dir dist
           uv venv --python ${{ matrix.python-version }} /tmp/cwa-wheel-smoke
           uv pip install --python /tmp/cwa-wheel-smoke/bin/python dist/*.whl
           /tmp/cwa-wheel-smoke/bin/python -c "import cwa_reader_rs; cwa_reader_rs.read_cwa_file('tests/reference_data/openmovement/example-610-steps.cwa')"
@@ -70,7 +70,7 @@ jobs:
         uses: PyO3/maturin-action@v1
         with:
           target: ${{ matrix.platform.target }}
-          args: --release --out dist --find-interpreter
+          args: --release --manifest-path python/Cargo.toml --out dist --find-interpreter
           sccache: ${{ !startsWith(github.ref, 'refs/tags/') }}
           manylinux: auto
       - name: Upload wheels
@@ -101,7 +101,7 @@ jobs:
         uses: PyO3/maturin-action@v1
         with:
           target: ${{ matrix.platform.target }}
-          args: --release --out dist --find-interpreter
+          args: --release --manifest-path python/Cargo.toml --out dist --find-interpreter
           sccache: ${{ !startsWith(github.ref, 'refs/tags/') }}
           manylinux: musllinux_1_2
       - name: Upload wheels
@@ -129,7 +129,7 @@ jobs:
         uses: PyO3/maturin-action@v1
         with:
           target: ${{ matrix.platform.target }}
-          args: --release --out dist --find-interpreter
+          args: --release --manifest-path python/Cargo.toml --out dist --find-interpreter
           sccache: ${{ !startsWith(github.ref, 'refs/tags/') }}
       - name: Upload wheels
         uses: actions/upload-artifact@v4
@@ -153,7 +153,7 @@ jobs:
         uses: PyO3/maturin-action@v1
         with:
           target: ${{ matrix.platform.target }}
-          args: --release --out dist --find-interpreter
+          args: --release --manifest-path python/Cargo.toml --out dist --find-interpreter
           sccache: ${{ !startsWith(github.ref, 'refs/tags/') }}
       - name: Upload wheels
         uses: actions/upload-artifact@v4
@@ -169,7 +169,7 @@ jobs:
         uses: PyO3/maturin-action@v1
         with:
           command: sdist
-          args: --out dist
+          args: --manifest-path python/Cargo.toml --out dist
       - name: Upload sdist
         uses: actions/upload-artifact@v4
         with:
@@ -195,8 +195,58 @@ jobs:
         uses: actions/attest-build-provenance@v2
         with:
           subject-path: 'wheels-*/*'
+      - name: Check release versions and checksum native distributions
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          python - <<'PY'
+          import email.parser, hashlib, os, tarfile, zipfile
+          from pathlib import Path
+          version = os.environ['RELEASE_TAG'].removeprefix('v')
+          files = sorted(Path('.').glob('wheels-*/*'))
+          assert files, 'no native distributions downloaded'
+          checksums = []
+          for path in files:
+              if path.suffix == '.whl':
+                  with zipfile.ZipFile(path) as archive:
+                      metadata = archive.read(next(name for name in archive.namelist() if name.endswith('.dist-info/METADATA'))).decode()
+              else:
+                  with tarfile.open(path) as archive:
+                      metadata = archive.extractfile(next(member for member in archive.getmembers() if member.name.endswith('/PKG-INFO'))).read().decode()
+              assert email.parser.Parser().parsestr(metadata)['Version'] == version, path
+              checksums.append(f'{hashlib.sha256(path.read_bytes()).hexdigest()}  {path.name}\n')
+          Path(f'cwa_reader_rs-{version}-native-SHA256SUMS.txt').write_text(''.join(checksums))
+          PY
       - name: Publish to PyPI
         uses: PyO3/maturin-action@v1
         with:
           command: upload
           args: --non-interactive --skip-existing wheels-*/*
+      - uses: actions/upload-artifact@v4
+        with:
+          name: native-release-checksums
+          if-no-files-found: error
+          overwrite: true
+          path: cwa_reader_rs-*-native-SHA256SUMS.txt
+
+  release-assets:
+    name: Attach native GitHub assets
+    if: ${{ github.event_name == 'release' }}
+    needs: [release]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: wheels-*
+      - uses: actions/download-artifact@v4
+        with:
+          name: native-release-checksums
+          path: .
+      - name: Attach native distributions to GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: gh release upload "$RELEASE_TAG" wheels-*/* cwa_reader_rs-*-native-SHA256SUMS.txt

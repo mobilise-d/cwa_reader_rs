@@ -1,0 +1,53 @@
+context:
+  version: 0.5.0
+package:
+  name: cwa_reader_rs
+  version: ${{ version }}
+source:
+  path: ../..
+  filter:
+    exclude:
+      - .git/**
+      - .venv/**
+      - target/**
+      - dist/**
+      - .agent/**
+      - tests/**
+      - python/tests/**
+      - python/.venv/**
+      - python/dist/**
+      - python/target/**
+build:
+  number: 0
+  script: build.sh
+  files:
+    exclude:
+      - "**/__pycache__/**"
+      - "**/*.pyc"
+      - "**/direct_url.json"
+      - "**/REQUESTED"
+  python:
+    skip_pyc_compilation:
+      - '**/*.py'
+requirements:
+  build:
+    - cross-python_emscripten-wasm32 ==3.13.1 ha770c72_20
+    - emscripten_emscripten-wasm32 ==4.0.9 h7db64ff_9
+    - rust-nightly ==1.95.0 ha770c72_1
+    - maturin ==1.15.0
+  host:
+    - python ==3.13.1 h_2efca29_11_cp313
+    - python_abi ==3.13 9_cp313
+    - emscripten-abi ==4.0.9 h267e887_9
+    - numpy ==2.4.6 py313hcf5bae3_0
+    - pandas ==3.0.6 np23py313h124dbc7_0
+  run:
+    - python ==3.13.1 h_2efca29_11_cp313
+    - python_abi ==3.13 9_cp313
+    - emscripten-abi ==4.0.9 h267e887_9
+    - numpy ==2.4.6 py313hcf5bae3_0
+    - pandas ==3.0.6 np23py313h124dbc7_0
+about:
+  summary: CWA reader Python extension for the single-thread Xeus Python 3.13 runtime
+  license: MIT
+  license_file: LICENSE

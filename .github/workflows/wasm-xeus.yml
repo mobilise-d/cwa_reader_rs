@@ -1,0 +1,90 @@
+name: Xeus WASM
+on:
+  pull_request:
+  push:
+    branches: [main, master]
+  workflow_dispatch:
+  release:
+    types: [published]
+permissions:
+  contents: read
+jobs:
+  build-browser-test:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: astral-sh/setup-uv@v4
+      - uses: mamba-org/setup-micromamba@v2
+        with:
+          environment-name: wasm-build-tools
+          create-args: >-
+            -c conda-forge
+            rattler-build=0.67.0
+          init-shell: bash
+          cache-environment: true
+      - name: Build local Xeus conda artifact
+        shell: bash -el {0}
+        run: tools/wasm/build-xeus.sh "$RUNNER_TEMP/cwa-xeus"
+      - name: Native baseline from the same checkout
+        run: |
+          uv sync --project python --dev --python 3.13
+          uv run --project python --no-sync pytest -q python/tests
+          uv run --project python --no-sync python tools/wasm/parity.py "$GITHUB_WORKSPACE" "$RUNNER_TEMP/cwa-xeus"
+      - name: Install browser build and test tools
+        run: |
+          uv venv "$RUNNER_TEMP/cwa-browser-tools"
+          uv pip install --python "$RUNNER_TEMP/cwa-browser-tools/bin/python" jupyterlite-xeus==5.1.0 jupyterlite-core==0.8.6 jupyterlab==4.6.4 empack==6.0.1 playwright==1.58.0
+          "$RUNNER_TEMP/cwa-browser-tools/bin/playwright" install --with-deps chromium
+      - name: Build Xeus environment from the local channel
+        shell: bash -el {0}
+        run: |
+          export PATH="$RUNNER_TEMP/cwa-browser-tools/bin:$PATH"
+          python tools/wasm/prepare-runtime.py "$RUNNER_TEMP/cwa-xeus"
+      - name: Import and compare in an actual Chromium Xeus worker
+        run: "$RUNNER_TEMP/cwa-browser-tools/bin/python tools/wasm/headless-test.py $RUNNER_TEMP/cwa-xeus"
+      - name: Assemble installable release assets
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          SOURCE_REVISION: ${{ github.sha }}
+        run: |
+          python tools/wasm/release-assets.py "$RUNNER_TEMP/cwa-xeus" --release-tag "$RELEASE_TAG" --source-revision "$SOURCE_REVISION"
+      - name: Upload local package and validation metadata
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: xeus-wasm-python313-emscripten409
+          if-no-files-found: error
+          path: |
+            ${{ runner.temp }}/cwa-xeus/channel/emscripten-wasm32/*.tar.bz2
+            ${{ runner.temp }}/cwa-xeus/channel/emscripten-wasm32/repodata.json
+            ${{ runner.temp }}/cwa-xeus/channel/noarch/repodata.json
+            ${{ runner.temp }}/cwa-xeus/artifact-manifest.json
+            ${{ runner.temp }}/cwa-xeus/runtime-packages.json
+            ${{ runner.temp }}/cwa-xeus/results/browser-report.json
+            ${{ runner.temp }}/cwa-xeus/release/*
+
+  release:
+    if: ${{ github.event_name == 'release' }}
+    needs: [build-browser-test]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: xeus-wasm-python313-emscripten409
+          path: ${{ runner.temp }}/cwa-xeus-assets
+      - name: Attach Xeus package and local channel to GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: gh release upload "$RELEASE_TAG" "$RUNNER_TEMP/cwa-xeus-assets/release/"*

@@ -32,3 +32,18 @@ A wheel build and metadata smoke test in a clean environment also passed.
 
 Implementation commit: 9f32884 before final curation. PR: #8.
 Final review and delivery state are tracked in the session task state.
+
+## Integration into the byte-capable core
+
+PR #8 merged into main as 53830c8. Its boundary lookup was already adapted in
+b50bb9a to the generic Read+Seek implementation in crates/cwa-core/src/header.rs.
+The root Python bridge in src/python/header.rs delegates to CwaReader; no legacy
+src/header.rs implementation remains. Sampling reports retain the full timing
+scan and real sample count, and metadata retains the same serialized fields.
+The source PR's decision against new permanent optimization tests remains in force.
+
+Merge review unit: preserve reviewed history with a normal merge of origin/main,
+retain the extracted implementation, consolidate the duplicate README metadata
+text, run the existing 13 Rust and 122 native Python tests plus formatting and
+boundary parity checks, then commit and close the merge review. The parent owns
+pushing and PR delivery. No buffering changes are included in this merge.

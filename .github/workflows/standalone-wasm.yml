@@ -1,0 +1,120 @@
+name: Standalone browser WASM
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+
+jobs:
+  browser-reader:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.90.0
+        with:
+          targets: wasm32-unknown-unknown
+          components: rustfmt
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - uses: astral-sh/setup-uv@v4
+      - name: Build native comparison package from this checkout
+        run: |
+          uv venv --python 3.13 /tmp/cwa-browser-native
+          uv pip install --python /tmp/cwa-browser-native/bin/python ./python pytest
+          echo 'CWA_NATIVE_PYTHON=/tmp/cwa-browser-native/bin/python' >> "$GITHUB_ENV"
+      - name: Install matching Wasm binding generator
+        run: cargo install wasm-bindgen-cli --version 0.2.129 --locked
+      - name: Build browser bundle
+        run: |
+          cargo fmt --manifest-path wasm/Cargo.toml --check
+          wasm/build.sh
+      - name: Install browser test tools
+        working-directory: wasm
+        run: |
+          npm ci
+          npx playwright install --with-deps chromium
+      - name: Check browser declarations
+        working-directory: wasm
+        run: npm run typecheck
+      - name: Compare browser File reads with native Python
+        working-directory: wasm
+        run: npm test
+      - name: Test installed npm tarball in a production consumer
+        working-directory: wasm
+        run: npm run test:package
+      - name: Measure bounded File batch consumption
+        working-directory: wasm
+        run: |
+          node scripts/bench.mjs --input ../tests/reference_data/openmovement/example-610-steps.cwa \
+            --output test-results/batch-metrics.json --alias public-fixture \
+            --batches 64,256,1024 --repeats 1 --mode full
+      - name: Assemble tested browser release assets
+        working-directory: wasm
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: node scripts/release-assets.mjs
+      - name: Upload browser bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: standalone-browser-wasm
+          path: |
+            wasm/pkg/
+            wasm/example/
+            wasm/Cargo.lock
+            wasm/scripts/bench.mjs
+            wasm/scripts/serve.mjs
+            wasm/package.json
+            wasm/package-lock.json
+            wasm/README.md
+      - name: Upload installable local npm package
+        uses: actions/upload-artifact@v4
+        with:
+          name: standalone-browser-npm
+          path: |
+            wasm/dist/*.tgz
+            wasm/dist/npm-pack.json
+      - name: Upload browser results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: standalone-browser-test-results
+          path: |
+            wasm/test-results/results.json
+            wasm/test-results/header-metrics.json
+            wasm/test-results/recording-metrics.json
+            wasm/test-results/batch-metrics.json
+            wasm/test-results/npm-consumer.json
+      - name: Upload assembled release assets
+        uses: actions/upload-artifact@v4
+        with:
+          name: standalone-browser-release-assets
+          path: wasm/dist/release/
+
+  release-assets:
+    if: github.event_name == 'release'
+    needs: browser-reader
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: standalone-browser-release-assets
+          path: release-assets
+      - name: Attach tested browser distributions to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        # Existing assets fail rather than replacing different bytes. On a retry,
+        # verify existing checksums and upload only missing assets manually.
+        run: gh release upload "$RELEASE_TAG" release-assets/* --repo "$GITHUB_REPOSITORY"

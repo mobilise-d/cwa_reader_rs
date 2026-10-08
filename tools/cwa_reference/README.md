@@ -23,7 +23,7 @@ Downloaded/compiled assets are cached under `.cache/cwa-reference/`.
 
 ## Requirements
 
-- Python environment with this project installed (for example `uv sync --dev`)
+- Python environment with this project installed (for example `uv sync --project python --dev`)
 - `cc` in `PATH`
 - Internet access on first run (to download reference sources/data)
 
@@ -32,13 +32,13 @@ Downloaded/compiled assets are cached under `.cache/cwa-reference/`.
 ### 1) Compare partial windows against C
 
 ```bash
-uv run python tools/cwa_reference/compare_windows.py
+uv run --project python python tools/cwa_reference/compare_windows.py
 ```
 
 Useful options:
 
 ```bash
-uv run python tools/cwa_reference/compare_windows.py \
+uv run --project python python tools/cwa_reference/compare_windows.py \
   --file /path/to/data.cwa \
   --windows "1:3,25:7,123:11"
 ```
@@ -53,13 +53,13 @@ Timestamp numbers are in milliseconds (`min`, `max`, `mean`), and `xyz_max` is m
 ### 2) Benchmark metadata scan vs full parse
 
 ```bash
-uv run python tools/cwa_reference/benchmark_scan.py
+uv run --project python python tools/cwa_reference/benchmark_scan.py
 ```
 
 Useful options:
 
 ```bash
-uv run python tools/cwa_reference/benchmark_scan.py \
+uv run --project python python tools/cwa_reference/benchmark_scan.py \
   --file /path/to/data.cwa \
   --loops 50 \
   --projected-gb 15
