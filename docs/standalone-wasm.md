@@ -1,6 +1,7 @@
 # Standalone browser reader
 
-`wasm/` builds a browser module from the shared Rust core with Python disabled.
+`wasm/` builds a browser module directly from the shared `crates/cwa-core` crate.
+The core has no Python dependencies; the root crate is the Python extension.
 It uses `wasm32-unknown-unknown`, Rust 1.90.0 and wasm-bindgen 0.2.129. This bundle
 is independent of the Xeus Python extension and its Emscripten ABI.
 
@@ -25,7 +26,9 @@ bytes are sent to a server or written to a virtual filesystem.
 The generated JS, Wasm, type declarations, license and checksum/compiler manifest
 are in `wasm/pkg/`. Serve them with your application; the `.wasm` content type
 should be `application/wasm`. Rust and npm dependency locks live in
-`wasm/Cargo.lock` and `wasm/package-lock.json`.
+`wasm/Cargo.lock` and `wasm/package-lock.json`. The root Cargo workspace excludes
+`wasm/`, so its pinned build and lock stay independent of the Python/Emscripten
+toolchains.
 
 ## Feed a browser file to Rust
 

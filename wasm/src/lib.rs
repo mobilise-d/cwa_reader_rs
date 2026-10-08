@@ -1,4 +1,4 @@
-use cwa_reader_rs::header::read_cwa_header_bytes;
+use cwa_core::header::read_cwa_header_bytes;
 use serde::Serialize;
 use wasm_bindgen::prelude::*;
 
@@ -19,7 +19,7 @@ fn js_metadata(value: &impl Serialize) -> Result<JsValue, JsError> {
 /// Read header configuration and actual sample start/end timing from CWA bytes.
 #[wasm_bindgen(js_name = readMetadata)]
 pub fn read_metadata(bytes: &[u8]) -> Result<JsValue, JsError> {
-    let metadata = cwa_reader_rs::reader::CwaReader::new(std::io::Cursor::new(bytes))
+    let metadata = cwa_core::reader::CwaReader::new(std::io::Cursor::new(bytes))
         .read_metadata()
         .map_err(|error| JsError::new(&error.to_string()))?;
     js_metadata(&metadata)
@@ -28,7 +28,7 @@ pub fn read_metadata(bytes: &[u8]) -> Result<JsValue, JsError> {
 /// Compare configured timing and sampling rate with the data packets.
 #[wasm_bindgen(js_name = samplingConsistencyReport)]
 pub fn sampling_consistency_report(bytes: &[u8]) -> Result<JsValue, JsError> {
-    let report = cwa_reader_rs::reader::CwaReader::new(std::io::Cursor::new(bytes))
+    let report = cwa_core::reader::CwaReader::new(std::io::Cursor::new(bytes))
         .sampling_consistency_report()
         .map_err(|error| JsError::new(&error.to_string()))?;
     js_metadata(&report)
@@ -61,18 +61,15 @@ enum BrowserCut {
 }
 
 impl BrowserCut {
-    fn core(&self) -> cwa_reader_rs::data::CutConfig {
+    fn core(&self) -> cwa_core::data::CutConfig {
         match *self {
-            Self::Blocks { start, end } => cwa_reader_rs::data::CutConfig::Blocks { start, end },
-            Self::Seconds { start, end } => cwa_reader_rs::data::CutConfig::Seconds { start, end },
+            Self::Blocks { start, end } => cwa_core::data::CutConfig::Blocks { start, end },
+            Self::Seconds { start, end } => cwa_core::data::CutConfig::Seconds { start, end },
         }
     }
 }
 
-fn read_options(
-    value: JsValue,
-    csv: bool,
-) -> Result<cwa_reader_rs::reader::CwaReadOptions, JsError> {
+fn read_options(value: JsValue, csv: bool) -> Result<cwa_core::reader::CwaReadOptions, JsError> {
     let options = if value.is_undefined() || value.is_null() {
         BrowserOptions::default()
     } else {
@@ -82,13 +79,13 @@ fn read_options(
         .cut
         .as_ref()
         .map(BrowserCut::core)
-        .unwrap_or(cwa_reader_rs::data::CutConfig::Full);
+        .unwrap_or(cwa_core::data::CutConfig::Full);
     cut.validate()
         .map_err(|error| JsError::new(&error.to_string()))?;
     let resample = options
         .resample_hz
         .map(|hz| {
-            cwa_reader_rs::data::ResampleOptions::parse(
+            cwa_core::data::ResampleOptions::parse(
                 hz,
                 options.resample_method.as_deref().unwrap_or("cubic"),
             )
@@ -113,9 +110,9 @@ fn read_options(
             Ok(micros)
         })
         .transpose()?;
-    Ok(cwa_reader_rs::reader::CwaReadOptions {
+    Ok(cwa_core::reader::CwaReadOptions {
         cut,
-        channels: cwa_reader_rs::data::CwaParsingOptions {
+        channels: cwa_core::data::CwaParsingOptions {
             include_magnetometer: options.include_magnetometer.unwrap_or(true),
             include_temperature: options.include_temperature.unwrap_or(!csv),
             include_light: options.include_light.unwrap_or(!csv),
@@ -132,7 +129,7 @@ fn set(target: &JsValue, key: &str, value: &JsValue) -> Result<(), JsError> {
         .map_err(|error| JsError::new(&format!("{error:?}")))
 }
 
-fn sample_arrays(data: cwa_reader_rs::data::CwaDataResult, utc: bool) -> Result<JsValue, JsError> {
+fn sample_arrays(data: cwa_core::data::CwaDataResult, utc: bool) -> Result<JsValue, JsError> {
     let columns = js_sys::Object::new();
     for (name, values) in [
         ("acc_x", data.acc_x),
@@ -190,7 +187,7 @@ pub fn read_cwa_file(
     #[wasm_bindgen(unchecked_optional_param_type = "ReadOptions")] options: JsValue,
 ) -> Result<JsValue, JsError> {
     let options = read_options(options, false)?;
-    let data = cwa_reader_rs::reader::CwaReader::new(std::io::Cursor::new(bytes))
+    let data = cwa_core::reader::CwaReader::new(std::io::Cursor::new(bytes))
         .read_data(&options)
         .map_err(|error| JsError::new(&error.to_string()))?;
     sample_arrays(data, options.fixed_utc_offset_us.is_some())
@@ -204,7 +201,7 @@ pub fn write_cwa_csv(
 ) -> Result<Vec<u8>, JsError> {
     let options = read_options(options, true)?;
     let mut output = Vec::new();
-    cwa_reader_rs::reader::CwaReader::new(std::io::Cursor::new(bytes))
+    cwa_core::reader::CwaReader::new(std::io::Cursor::new(bytes))
         .write_csv(&mut output, &options)
         .map_err(|error| JsError::new(&error.to_string()))?;
     Ok(output)

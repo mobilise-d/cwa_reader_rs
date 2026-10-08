@@ -141,9 +141,10 @@ impl<R: Read + Seek> CwaReader<R> {
         self.write_csv_with(|| Ok(output), options)
     }
 
-    // A path adapter defers creating/truncating its output until input
-    // validation and channel scans finish, preserving native file behavior.
-    pub(crate) fn write_csv_with<W: Write, F: FnOnce() -> Result<W, CwaError>>(
+    /// Defer opening an output sink until input selection and channel scans
+    /// finish. Native path adapters use this to avoid truncating existing output
+    /// when input validation fails. The factory is called at most once.
+    pub fn write_csv_with<W: Write, F: FnOnce() -> Result<W, CwaError>>(
         &mut self,
         create_output: F,
         options: &CwaReadOptions,
@@ -317,6 +318,20 @@ mod tests {
             .write_csv(&mut output, &CwaReadOptions::default())
             .is_err());
         assert!(output.is_empty());
+        let mut output_opened = false;
+        assert!(reader
+            .write_csv_with(
+                || {
+                    output_opened = true;
+                    Ok(Vec::new())
+                },
+                &CwaReadOptions::default()
+            )
+            .is_err());
+        assert!(
+            !output_opened,
+            "invalid input must not create or truncate output"
+        );
         let mut reader = CwaReader::new(Cursor::new(bytes.as_slice()));
         let overflow = CwaReadOptions {
             fixed_utc_offset_us: Some(i64::MIN),

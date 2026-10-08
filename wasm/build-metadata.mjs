@@ -5,7 +5,7 @@ import { createHash } from 'node:crypto';
 const command = (...args) => execFileSync(args[0], args.slice(1), { encoding: 'utf8' }).trim();
 const manifest = {
   source_revision: command('git', 'rev-parse', 'HEAD'),
-  source_dirty: command('git', 'status', '--porcelain', '--', '../src', '../Cargo.toml', '../Cargo.lock', '.') !== '',
+  source_dirty: command('git', 'status', '--porcelain', '--', '../src', '../crates', '../Cargo.toml', '../Cargo.lock', '.') !== '',
   target: 'wasm32-unknown-unknown',
   rustc: command('rustc', '+1.90.0', '--version'),
   cargo: command('cargo', '+1.90.0', '--version'),

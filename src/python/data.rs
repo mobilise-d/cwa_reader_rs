@@ -1,5 +1,5 @@
-use crate::data::{CutConfig, CwaDataResult, CwaParsingOptions, ResampleOptions};
-use crate::reader::{CwaReadOptions, CwaReader};
+use cwa_core::data::{CutConfig, CwaDataResult, CwaParsingOptions, ResampleOptions};
+use cwa_core::reader::{CwaReadOptions, CwaReader};
 use numpy::IntoPyArray;
 use pyo3::prelude::*;
 use pyo3::types::{PyDelta, PyDeltaAccess, PyDict, PyTzInfo};

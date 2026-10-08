@@ -1,5 +1,5 @@
-use crate::header::{format_raw_time, timestamp_us_to_raw_string};
-use crate::reader::CwaReader;
+use cwa_core::header::{format_raw_time, timestamp_us_to_raw_string};
+use cwa_core::reader::CwaReader;
 use pyo3::prelude::*;
 
 /// Return a sampling consistency report for a CWA file.

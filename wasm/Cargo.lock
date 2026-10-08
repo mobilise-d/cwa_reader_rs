@@ -52,23 +52,23 @@ dependencies = [
 ]
 
 [[package]]
-name = "cwa_reader_browser"
-version = "0.4.0"
-dependencies = [
- "cwa_reader_rs",
- "js-sys",
- "serde",
- "serde-wasm-bindgen",
- "wasm-bindgen",
-]
-
-[[package]]
-name = "cwa_reader_rs"
+name = "cwa-core"
 version = "0.4.0"
 dependencies = [
  "chrono",
  "csv",
  "serde",
+]
+
+[[package]]
+name = "cwa_reader_browser"
+version = "0.4.0"
+dependencies = [
+ "cwa-core",
+ "js-sys",
+ "serde",
+ "serde-wasm-bindgen",
+ "wasm-bindgen",
 ]
 
 [[package]]

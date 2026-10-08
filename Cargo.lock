@@ -40,14 +40,21 @@ dependencies = [
 ]
 
 [[package]]
-name = "cwa_reader_rs"
+name = "cwa-core"
 version = "0.4.0"
 dependencies = [
  "chrono",
  "csv",
+ "serde",
+]
+
+[[package]]
+name = "cwa_reader_rs"
+version = "0.4.0"
+dependencies = [
+ "cwa-core",
  "numpy",
  "pyo3",
- "serde",
 ]
 
 [[package]]

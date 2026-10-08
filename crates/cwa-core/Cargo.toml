@@ -1,0 +1,12 @@
+[package]
+name = "cwa-core"
+version = "0.4.0"
+edition = "2021"
+license = "MIT"
+description = "CWA recording parsing, metadata, resampling and CSV over Rust readers and writers"
+exclude = ["tests/**"]
+
+[dependencies]
+chrono = { version = "0.4", default-features = false, features = ["std", "serde"] }
+serde = { version = "1.0", features = ["derive"] }
+csv = "1.3"
