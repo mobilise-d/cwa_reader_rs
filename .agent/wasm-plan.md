@@ -1,10 +1,38 @@
 # Browser builds and parser separation
 
-Status: active follow-up. Separate cwa-core extraction committed; integrate PR #8 metadata optimization and finish browser validation.
+Status: complete. Separate cwa-core, complete byte operations, and PR #8 integration validated and delivered.
 
-COMPACTION CONTINUITY: Re-read implement-code-change and the task-defining artifacts before continuing after compaction or session restoration.
+## Final follow-up verification
 
-## Current follow-up contract
+Reviewed head be6f7ed13447e7faa4096f7ce0c3f7e9af284f97; exact follow-up range
+f731c97801c9b48208582b26aab7b9021a1e891f..be6f7ed. Final review 14184 passed
+without findings and is closed. All implementation reviews are resolved and closed.
+No reviewed commit was rewritten and no code corrections followed final review.
+
+- Native: 13 Rust tests; 122 source and 122 installed-wheel tests; fresh isolated
+  sdist build/install/reference smoke. Receipt /tmp/cwa-core-package-acceptance/results.json;
+  artifacts /tmp/cwa-pr8-package-acceptance/artifacts. No fixture redistribution.
+- Standalone: clean be6f7ed, eight Chromium tests / 31 recording cases pass.
+  wasm/pkg contains the installable local bundle; Wasm 261,584 bytes, SHA256
+  009fb36261d1b1b14178d1ea02396d559c56d426f0114c2973b049df8c81bec2.
+  Ten binding generations identical. Real fixture 305,664 bytes -> 71,400x6,
+  8.4 ms read, 2,284,800 output-array bytes. Committed linear memory grows from
+  1,114,112 to 6,422,528 bytes after read/CSV. This is not peak memory.
+- Xeus: clean be6f7ed, 25 direct parity comparisons and 122 pytest tests pass.
+  CSV recovery matches native. Local conda artifact 167,408 bytes, SHA256
+  5468685fbf1157f9bec33bafd64f237ecaa17d4ce9bdddac6723968094f7ad7b.
+  Warm read median 2.7 ms; first read 11.2 ms. DataFrame/index 2,284,800 bytes;
+  committed heap 139,198,464 bytes unchanged, not a peak measurement.
+  Artifact/manifest/runtime/report under /tmp/cwa-xeus.
+- Final CI workflows passed: native 37777038905, standalone 37777039073,
+  Xeus 37777038869. Downloaded artifacts verified under /tmp/cwa-final-ci.
+  CI records its clean GitHub PR merge checkout c11fc73a230f18681de82c204f39a1c61837c748;
+  standalone reports eight passing tests; Xeus reports success and 122 tests.
+  CI package checksum verified and archive has no fixture/CSV files.
+- PR #7 includes attributed adaptation of PR #8. Both linked to this thread;
+  no package publication or PR merge. Final receipt is documentation only.
+
+## Follow-up contract
 
 Follow-up base: f731c97801c9b48208582b26aab7b9021a1e891f.
 The previous delivery exposed only header parsing in Wasm and left seconds-cut
