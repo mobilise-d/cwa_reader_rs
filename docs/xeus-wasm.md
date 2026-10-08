@@ -187,18 +187,18 @@ for measured full-file bounded decoding and browser File access.
 
 ## Local measurements and limits
 
-At source `8375b9b7119c0c2d5074c889ae55dd35e6358b5a`, a clean local Xeus
+At source `f0d08d922ec1d926c0e20a67270b7201a6cd6da9`, a clean local Xeus
 artifact passed all 128 repository Python tests and 25 direct native/browser
 comparisons, including CSV recovery. On the real 305,664-byte OpenMovement
-fixture (71,400 rows, six float32 columns), the first full read took 13.4 ms and
-the median of six subsequent reads was 4.2 ms. The DataFrame/index occupied
-2,284,800 bytes. Fixture transfer/extraction took 34.2 ms. The committed Wasm
+fixture (71,400 rows, six float32 columns), the first full read took 13.5 ms and
+the median of six subsequent reads was 2.3 ms. The DataFrame/index occupied
+2,284,800 bytes. Fixture transfer/extraction took 33.4 ms. The committed Wasm
 heap capacity stayed at 139,198,464 bytes; this is allocation capacity rather
 than peak live Rust/Python memory. Runtime/NumPy/pandas allocations are included.
 Runtime downloads and fixture transfer are excluded from reader timing.
 
 The source-clean conda artifact SHA256 was
-`3bf96e832b01f283f3f301f9535554bb91b0a6bd8bbd174945dd425295f9649e`.
+`8b739122fdcc7851cae159933244d27be2489ae0af4e2cd50479c4237ac3f430`.
 Regenerate the artifact manifest and browser report on the consumer's hardware;
 these measurements are evidence for this pinned ABI and runtime.
 

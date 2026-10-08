@@ -6,10 +6,10 @@ The returned data has acceleration, gyroscope and auxiliary channels: nine
 float32 columns. The input and participant-derived fingerprints remain outside
 the repository.
 
-The native and Xeus package source is
-`8375b9b7119c0c2d5074c889ae55dd35e6358b5a`. The source-clean Emscripten conda
+The final native and Xeus package source is
+`f0d08d922ec1d926c0e20a67270b7201a6cd6da9`. The source-clean Emscripten conda
 artifact SHA256 is
-`3bf96e832b01f283f3f301f9535554bb91b0a6bd8bbd174945dd425295f9649e`.
+`8b739122fdcc7851cae159933244d27be2489ae0af4e2cd50479c4237ac3f430`.
 The actual Xeus worker passed 128 Python tests and 25 native/browser comparisons.
 See [the build guide](xeus-wasm.md) for the pinned runtime and install commands.
 
@@ -42,6 +42,10 @@ the checkout.
 
 ## Full decode with bounded output
 
+This five-size sweep used source `8375b9b`, before the raw staging, timing-history
+and packet-copy simplifications. It records the batch-size/memory tradeoff;
+current native DataFrame measurements appear below.
+
 The full raw recording contains 34,124,320 rows, representing 1,501,470,080 bytes
 of decoded columns and timestamps. At 60 Hz it contains 20,735,689 rows and
 912,370,316 decoded bytes. Those bytes are consumed and discarded batch by batch;
@@ -57,7 +61,8 @@ they are not simultaneously resident.
 
 RSS is the maximum across raw and resampled repeats. Larger batches reduce
 requests but increase working memory and do not guarantee better throughput.
-The default 256 packets gives a small working set with near-best native times.
+In this sweep, default 256 packets gave a small working set with near-best
+native times.
 
 ## Standalone browser bounded output
 
@@ -78,9 +83,22 @@ is the maximum linear-memory capacity across raw and resampled runs.
 The native and browser bounded timings measure the same recording and output
 row counts. Their memory metrics differ, so compare capacity/RSS within each
 runtime. The larger browser batch improves throughput at a substantial memory
-cost. The default 256 uses 4.375 MiB while decoding the four-day recording.
+cost. In this earlier sweep, default 256 used 4.375 MiB while decoding the
+four-day recording.
+
+After the simplifications, a fresh three-repeat default-256 check at standalone
+source `1d7c19b` (including core `f0d08d9`) measured raw **2.5397 s** and 60 Hz
+**6.5490 s**. Committed Wasm capacities were **1.750 MiB raw** and **4.625 MiB
+resampled**. Both modes made 3,334 File reads, totalling 440,203,266 bytes, with
+a largest input slice of 132,096 bytes. Output row counts and cumulative bytes
+remained the same; every returned batch was discarded. The raw temporary
+staging removal reduced raw working memory, while resampled capacity grew
+slightly from the earlier sweep.
 
 ## Xeus local File windows
+
+The following five-size window sweep used source `8375b9b`, before the final
+simplifications. Refreshed default-size measurements are recorded below.
 
 These Python reads return a 60-second DataFrame. Each browser invocation starts a
 fresh Xeus kernel, then runs three repeats per position with counters reset on a
@@ -109,6 +127,8 @@ occupies 260,656 bytes; 60 Hz output has
 
 ## Xeus full scans and CSV
 
+These size comparisons also used source `8375b9b`.
+
 `read_metadata` performs five actual Blob reads totalling 2,560 bytes and has a
 2.1 ms median. The full sampling consistency report has a 1.195 s median,
 3,340 actual Blob reads and 436,795,904 bytes read. Its 3,341 logical filesystem
@@ -132,6 +152,32 @@ Xeus heap capacities include the Python runtime, NumPy and pandas, unlike the
 small standalone Wasm module. CSV storage/formatting and bounded binary batch
 consumption are different workloads.
 
+## Final Xeus default-size refresh
+
+At final core source `f0d08d9`, the rebuilt extension passed 128 Python tests,
+25 direct native/browser comparisons and recovered CSV parity in the actual
+Xeus worker. A fresh direct WORKERFS check used 256 packets and three repeats
+per workload, with the same local recording and no whole-file staging.
+
+| 60-second selection | Raw median, ms | 60 Hz median, ms | Actual Blob reads | Bytes read |
+|---|---:|---:|---:|---:|
+| First | 2.6 | 2.4 | 11 | 79,994 |
+| Middle | 4.5 | 3.9 | 20 | 81,288 |
+| Last | 4.0 | 5.0 | 16 | 81,168 |
+
+All 18 window outputs matched the previously native-verified integer timestamps
+and float32 fingerprints exactly on this recording. Counters include companion
+metadata reads; reader timings exclude them. The runtime committed heap stayed
+at 132.750 MiB throughout. The largest requested window slice was 78,336 bytes.
+
+Metadata median was 2.2 ms with five Blob reads and 2,560 input bytes. The full
+sampling report median was 1.1359 s with 3,340 Blob reads and 436,795,904 bytes.
+Full bounded CSV to `/dev/null` took 33.463, 28.005 and 26.755 s, a median of
+28.005 s. Each CSV run made 6,672 Blob reads totalling 880,409,090 bytes; committed
+heap remained 132.750 MiB. These repeats share a kernel and have no explicit
+reader/JIT warmup, so the descending CSV times should not be interpreted as a
+steady-state guarantee. CSV formatting remains part of the measured call.
+
 ## Native Python collection
 
 These calls use the ordinary raw `read_cwa_file` API with all default channels,
@@ -140,12 +186,19 @@ and process peak RSS are captured immediately after the call, before bounded
 correctness hashing. All repeats agreed on output fingerprints, row counts, dtypes and integer
 nanosecond timestamps.
 
-| Selection | Rows | DataFrame/index bytes | Median reader time, s | Read-phase process peak RSS, MiB |
-|---|---:|---:|---:|---:|
-| Full four-day recording | 34,124,320 | 1,501,470,080 | 1.5871 | 1509.5 |
-| First 24 hours | 8,530,963 | 375,362,372 | 0.4476 | 441.3 |
-| Middle 24 hours | 8,531,332 | 375,378,608 | 0.3909 | 440.3 |
-| Last 24 hours | 8,531,344 | 375,379,136 | 0.3908 | 441.5 |
+| Selection | Rows | DataFrame/index bytes | Optimized median, s | Old unbatched median, s | Speedup | Optimized / old read-phase peak RSS, MiB |
+|---|---:|---:|---:|---:|---:|---:|
+| Full four-day recording | 34,124,320 | 1,501,470,080 | 0.6898 | 1.2408 | 1.80× | 1511.4 / 1501.3 |
+| First 24 hours | 8,530,963 | 375,362,372 | 0.1847 | 0.6870 | 3.72× | 432.7 / 639.2 |
+| Middle 24 hours | 8,531,332 | 375,378,608 | 0.1848 | 0.6879 | 3.72× | 439.0 / 639.5 |
+| Last 24 hours | 8,531,344 | 375,379,136 | 0.1873 | 0.7176 | 3.83× | 434.5 / 642.1 |
+
+The final optimized source above and the preserved unbatched source `a686c45`
+were measured in three isolated paired repeats per selection with identical
+Python/NumPy/pandas versions. All 24 outputs had exactly matching integer
+nanosecond timestamps, float32 sensor fingerprints, columns and row counts.
+RSS entries are medians of read-phase process peaks. Historical binaries,
+comparison scripts and receipts remain outside the repository.
 
 The middle window starts half a day before the recording midpoint. The last
 window ends at the final valid sample time. The full collector retains roughly
