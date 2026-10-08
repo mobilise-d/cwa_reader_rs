@@ -163,19 +163,26 @@ fn open_cwa_data_blocks(
     num_blocks: Option<usize>,
 ) -> Result<(File, usize, usize, Option<f64>), CwaError> {
     let mut file = File::open(file_path)?;
+    let (start, end, previous) = prepare_cwa_data_blocks(&mut file, start_block, num_blocks)?;
+    Ok((file, start, end, previous))
+}
 
+fn prepare_cwa_data_blocks<R: Read + Seek>(
+    file: &mut R,
+    start_block: Option<usize>,
+    num_blocks: Option<usize>,
+) -> Result<(usize, usize, Option<f64>), CwaError> {
+    file.seek(SeekFrom::Start(0))?;
     let mut header = [0u8; 2];
     file.read_exact(&mut header)?;
     if header != *b"MD" {
         return Err("Not a valid CWA file".into());
     }
-
-    let file_size = file.metadata()?.len();
+    let file_size = file.seek(SeekFrom::End(0))?;
     let (start_block, end_block) = resolve_block_range(file_size, start_block, num_blocks)?;
-    let previous_packet_end = find_previous_packet_end(&mut file, start_block)?;
+    let previous_packet_end = find_previous_packet_end(file, start_block)?;
     file.seek(SeekFrom::Start(1024 + (start_block * 512) as u64))?;
-
-    Ok((file, start_block, end_block, previous_packet_end))
+    Ok((start_block, end_block, previous_packet_end))
 }
 
 fn cut_to_block_range(cut: CutConfig) -> Result<(Option<usize>, Option<usize>), CwaError> {
@@ -1099,9 +1106,24 @@ pub fn read_cwa_data(
     num_blocks: Option<usize>,
     options: Option<CwaParsingOptions>,
 ) -> Result<CwaDataResult, CwaError> {
-    let (mut file, start_block, end_block, initial_previous_packet_end) =
-        open_cwa_data_blocks(file_path, start_block, num_blocks)?;
+    read_cwa_data_from_reader(
+        &mut File::open(file_path)?,
+        start_block,
+        num_blocks,
+        options,
+    )
+}
 
+/// Decode a complete CWA file from seekable input, including uploaded bytes in a
+/// `std::io::Cursor`. Positions are relative to the start of the reader.
+pub fn read_cwa_data_from_reader<R: Read + Seek>(
+    mut file: &mut R,
+    start_block: Option<usize>,
+    num_blocks: Option<usize>,
+    options: Option<CwaParsingOptions>,
+) -> Result<CwaDataResult, CwaError> {
+    let (start_block, end_block, initial_previous_packet_end) =
+        prepare_cwa_data_blocks(file, start_block, num_blocks)?;
     let options = options.unwrap_or_default();
 
     // Pre-allocate columnar vectors for better performance
@@ -1424,7 +1446,10 @@ fn natural_packet_bounds(
     .natural_bounds())
 }
 
-fn find_previous_packet_end(file: &mut File, start_block: usize) -> Result<Option<f64>, CwaError> {
+fn find_previous_packet_end<R: Read + Seek>(
+    file: &mut R,
+    start_block: usize,
+) -> Result<Option<f64>, CwaError> {
     if start_block == 0 {
         return Ok(None);
     }
@@ -1732,6 +1757,39 @@ pub fn write_cwa_csv_data(
 mod tests {
     use super::*;
     use chrono::TimeZone;
+
+    #[test]
+    fn uploaded_bytes_decode_and_block_cuts_keep_full_read_timestamps() {
+        let mut bytes = vec![0u8; 2048];
+        bytes[..2].copy_from_slice(b"MD");
+        for block in 0..2 {
+            let start = 1024 + block * 512;
+            let packet = &mut bytes[start..start + 512];
+            packet[..2].copy_from_slice(b"AX");
+            packet[2..4].copy_from_slice(&508u16.to_le_bytes());
+            packet[14..18].copy_from_slice(
+                &encode_cwa_timestamp(2012, 1, 1, 0, 0, block as u32 + 1).to_le_bytes(),
+            );
+            packet[24] = 0x4a;
+            packet[25] = 0x32;
+            packet[28..30].copy_from_slice(&2u16.to_le_bytes());
+            packet[30..32].copy_from_slice(&256i16.to_le_bytes());
+        }
+        let full = read_cwa_data_from_reader(&mut std::io::Cursor::new(&bytes), None, None, None)
+            .expect("uploaded recording");
+        let cut =
+            read_cwa_data_from_reader(&mut std::io::Cursor::new(&bytes), Some(1), Some(1), None)
+                .expect("block cut");
+        assert_eq!(full.acc_x, vec![1.0, 0.0, 1.0, 0.0]);
+        assert!(full.gyro_x.is_none());
+        assert_eq!(cut.timestamps, full.timestamps[2..]);
+        assert_eq!(full.timestamps[0], 1_325_376_001_000_000);
+        let timing = crate::header::scan_data_timing_from_reader(&mut std::io::Cursor::new(&bytes))
+            .expect("timing metadata");
+        assert_eq!(timing.sample_count, 4);
+        assert_eq!(timing.first_sample_us, Some(full.timestamps[0]));
+        assert_eq!(timing.last_sample_us, full.timestamps.last().copied());
+    }
 
     fn encode_cwa_timestamp(
         year: i32,

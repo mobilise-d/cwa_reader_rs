@@ -3,7 +3,7 @@ use crate::packet::{cwa_timestamp, packet_meta, read_sector};
 use chrono::{DateTime, TimeZone, Utc};
 use serde::Serialize;
 use std::fs::File;
-use std::io::Read;
+use std::io::{Cursor, Read};
 
 #[derive(Debug, Serialize, Clone)]
 pub struct CwaHeader {
@@ -58,11 +58,22 @@ fn parse_annotation(buffer: &[u8]) -> String {
 }
 
 pub fn read_cwa_header(file_path: &str) -> Result<CwaHeader, errors::CwaError> {
-    let mut file = File::open(file_path)?;
+    read_cwa_header_from_reader(&mut File::open(file_path)?)
+}
+
+/// Parse the first 1,024 bytes of a browser file without inspecting data packets.
+/// Device clock values are represented with `Utc` for arithmetic; they do not
+/// establish the recording's actual timezone.
+pub fn read_cwa_header_bytes(bytes: &[u8]) -> Result<CwaHeader, errors::CwaError> {
+    read_cwa_header_from_reader(&mut Cursor::new(bytes))
+}
+
+/// Read a complete metadata block at the reader's current position.
+pub fn read_cwa_header_from_reader<R: Read>(reader: &mut R) -> Result<CwaHeader, errors::CwaError> {
     let mut buffer = vec![0u8; 1024]; // CWA header is always 1024 bytes
 
     // Read the complete header block
-    file.read_exact(&mut buffer)?;
+    reader.read_exact(&mut buffer)?;
 
     // Parse packet header (offset 0-1): ASCII "MD", little-endian (0x444D)
     let packet_header =
@@ -202,8 +213,14 @@ pub fn timestamp_us_to_raw_string(timestamp_us: i64) -> Option<String> {
 }
 
 pub fn scan_data_timing(file_path: &str) -> Result<DataTimingSummary, errors::CwaError> {
-    let mut file = File::open(file_path)?;
+    scan_data_timing_from_reader(&mut File::open(file_path)?)
+}
 
+/// Scan metadata and packet timing from the reader's current position without
+/// decoding sensor measurements.
+pub fn scan_data_timing_from_reader<R: Read>(
+    mut file: &mut R,
+) -> Result<DataTimingSummary, errors::CwaError> {
     let mut metadata = [0u8; 1024];
     file.read_exact(&mut metadata)?;
     if &metadata[0..2] != b"MD" {
@@ -244,4 +261,34 @@ pub fn scan_data_timing(file_path: &str) -> Result<DataTimingSummary, errors::Cw
         last_sample_us,
         sample_count: sample_count_total,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn header_bytes_read_device_configuration_without_data_packets() {
+        let mut bytes = [0u8; 1024];
+        bytes[..2].copy_from_slice(b"MD");
+        bytes[2..4].copy_from_slice(&1020u16.to_le_bytes());
+        bytes[4] = 0x64;
+        bytes[5..7].copy_from_slice(&42u16.to_le_bytes());
+        bytes[7..11].copy_from_slice(&17u32.to_le_bytes());
+        bytes[11..13].copy_from_slice(&2u16.to_le_bytes());
+        bytes[35] = 0x14;
+        bytes[36] = 0x4a;
+        bytes[64..69].copy_from_slice(b"hello");
+        let header = read_cwa_header_bytes(&bytes).expect("complete header");
+        assert_eq!(header.device_id, 131114);
+        assert_eq!(header.session_id, 17);
+        assert_eq!(header.hardware_type, "AX6");
+        assert_eq!(header.sample_rate_hz, 100.0);
+        assert_eq!(header.accel_range, 8);
+        assert_eq!(header.gyro_range, Some(500));
+        assert!(header.magnetometer_enabled);
+        assert_eq!(header.annotation, "hello");
+        assert!(header.logging_start_time.is_none());
+        assert!(read_cwa_header_bytes(&bytes[..1023]).is_err());
+    }
 }
