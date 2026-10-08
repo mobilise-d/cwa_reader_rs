@@ -208,7 +208,7 @@ npx playwright install chromium
 CWA_NATIVE_PYTHON=/tmp/cwa-browser-native/bin/python npm test
 ```
 
-Fourteen actual Chromium tests compare full metadata/report fields and 31 sample/CSV
+Fifteen actual Chromium tests compare full metadata/report fields and 31 sample/CSV
 cases against the native Python package from the same checkout. Cases cover full
 reads, block/seconds cuts, resampling, channel flags, packed samples, 3/6/9-axis and
 mixed layouts, recorded zeros, missing values, fixed positive/negative/zero and

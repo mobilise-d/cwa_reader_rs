@@ -1,6 +1,6 @@
 # Packet-batched reader
 
-Status: final verification and review. Base a686c45c4f362ed73aa404d16799e0cd2bf9cf98.
+Status: implementation, user-requested simplicity/performance follow-up. Base a686c45c4f362ed73aa404d16799e0cd2bf9cf98.
 PR https://github.com/mobilise-d/cwa_reader_rs/pull/7 remains the delivery PR.
 All previously reviewed history is immutable; use normal new commits.
 
@@ -158,3 +158,39 @@ and short-window numbers are not substitutes. Use isolated sequential processes,
 same options/input, report rows/output parity, reader timing and peak RSS. Keep
 historical comparison scripts and receipts outside the repository; do not restore
 obsolete benchmark modes. These results must be shown to the user.
+
+## Simplicity and native overhead follow-up
+
+The user explicitly requested two GPT-6.1-sol high-reasoning agents: one to review
+duplicated paths/passes and complexity from poorly fitting interfaces, another to
+reduce batching overhead toward the old native full-read performance. Existing
+agents are reused: Xeus agent is the read-only simplicity reviewer, core agent
+owns profiling and implementation. They coordinate overlapping findings; parent
+owns integration. Standalone agent remains available for adapter changes.
+
+Baseline actual Python full DataFrame: old unbatched a686c45 median 1.3046 s,
+pre-optimization batched 8375b9b median 1.5871 s. First/middle/last 24-hour cuts
+were old 0.7360/0.7473/0.7198 s versus batched 0.4476/0.3909/0.3908 s. Read-phase
+peak RSS was about 1510 MiB full, 441 MiB daily. Three isolated sequential runs
+per case, same real recording/options, all 36 outputs identical. Historical
+scripts/receipts stay outside the repository. Keep the useful current-reader
+full/day benchmark.
+
+Ranked profiling hypotheses: temporary staging and batch-to-collector copies;
+fresh allocations and per-row capacity checks; repeated packet metadata and
+per-sample setup. Measure before changing one mechanism at a time. Preserve one
+engine, bounded independent batches, overlap/error semantics, global cubic grid,
+ordered seconds cuts, native Python behavior, and no multiprocessing. Seek a
+simpler interface as well as lower cost; do not restore the old reader or add
+speculative abstractions. Finish and commit coherent changes with focused parity
+checks, then repeat actual full/day Python measurements. Check native/Wasm output
+parity and bounded-memory behavior after material changes. Report remaining
+tradeoffs honestly.
+
+Final review14240 covered a686c45..d029904 and found a short zero-overlap cut
+context bug. Normal correction02e4d10 and browser regression3ddf079 address it;
+24 Rust/128 Python/15 standalone tests pass at that point. A related one-sample
+context error found by the correction review is being fixed before performance
+work. Preserve all reviewed history and correction commits. After the new
+user-requested optimization/simplicity work, review its new range from d029904;
+this is new scope, not a repeat review merely for14240 corrections.
