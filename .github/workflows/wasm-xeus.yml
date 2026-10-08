@@ -4,6 +4,8 @@ on:
   push:
     branches: [main, master]
   workflow_dispatch:
+  release:
+    types: [published]
 permissions:
   contents: read
 jobs:
@@ -48,6 +50,12 @@ jobs:
           python tools/wasm/prepare-runtime.py "$RUNNER_TEMP/cwa-xeus"
       - name: Import and compare in an actual Chromium Xeus worker
         run: "$RUNNER_TEMP/cwa-browser-tools/bin/python tools/wasm/headless-test.py $RUNNER_TEMP/cwa-xeus"
+      - name: Assemble installable release assets
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          SOURCE_REVISION: ${{ github.sha }}
+        run: |
+          python tools/wasm/release-assets.py "$RUNNER_TEMP/cwa-xeus" --release-tag "$RELEASE_TAG" --source-revision "$SOURCE_REVISION"
       - name: Upload local package and validation metadata
         if: always()
         uses: actions/upload-artifact@v4
@@ -61,3 +69,22 @@ jobs:
             ${{ runner.temp }}/cwa-xeus/artifact-manifest.json
             ${{ runner.temp }}/cwa-xeus/runtime-packages.json
             ${{ runner.temp }}/cwa-xeus/results/browser-report.json
+            ${{ runner.temp }}/cwa-xeus/release/*
+
+  release:
+    if: ${{ github.event_name == 'release' }}
+    needs: [build-browser-test]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: xeus-wasm-python313-emscripten409
+          path: ${{ runner.temp }}/cwa-xeus-assets
+      - name: Attach Xeus package and local channel to GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: gh release upload "$RELEASE_TAG" "$RUNNER_TEMP/cwa-xeus-assets/release/"*

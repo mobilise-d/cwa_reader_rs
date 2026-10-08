@@ -195,6 +195,34 @@ jobs:
         uses: actions/attest-build-provenance@v2
         with:
           subject-path: 'wheels-*/*'
+      - name: Check release versions and checksum native distributions
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          python - <<'PY'
+          import email.parser, hashlib, os, tarfile, zipfile
+          from pathlib import Path
+          version = os.environ['RELEASE_TAG'].removeprefix('v')
+          files = sorted(Path('.').glob('wheels-*/*'))
+          assert files, 'no native distributions downloaded'
+          checksums = []
+          for path in files:
+              if path.suffix == '.whl':
+                  with zipfile.ZipFile(path) as archive:
+                      metadata = archive.read(next(name for name in archive.namelist() if name.endswith('.dist-info/METADATA'))).decode()
+              else:
+                  with tarfile.open(path) as archive:
+                      metadata = archive.extractfile(next(member for member in archive.getmembers() if member.name.endswith('/PKG-INFO'))).read().decode()
+              assert email.parser.Parser().parsestr(metadata)['Version'] == version, path
+              checksums.append(f'{hashlib.sha256(path.read_bytes()).hexdigest()}  {path.name}\n')
+          Path(f'cwa_reader_rs-{version}-native-SHA256SUMS.txt').write_text(''.join(checksums))
+          PY
+      - name: Attach native distributions to GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: gh release upload "$RELEASE_TAG" wheels-*/* cwa_reader_rs-*-native-SHA256SUMS.txt
       - name: Publish to PyPI
         uses: PyO3/maturin-action@v1
         with:
