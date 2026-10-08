@@ -728,15 +728,6 @@ pub(crate) fn decode_loaded_batch(
                 }
                 let last_time = source.last().expect("source present").2.time_seconds;
                 let domain_end = plan.loaded_packets.end >= plan.selected_packets.end;
-                if owned_end.is_none()
-                    && !domain_end
-                    && in_batch_time_range(plan, origin, target_time(target_index))
-                {
-                    return Err(plan.insufficient(
-                        crate::errors::ContextSide::Right,
-                        "next ownership boundary is outside the loaded packets",
-                    ));
-                }
                 let mut interpolator = LoadedInterpolator {
                     samples: source.iter().map(|(_, _, sample)| sample.clone()).collect(),
                     acc_left: 0,
@@ -755,7 +746,11 @@ pub(crate) fn decode_loaded_batch(
                         }
                         return Err(plan.insufficient(
                             crate::errors::ContextSide::Right,
-                            "target bracket is outside the loaded packets",
+                            if owned_end.is_none() {
+                                "next ownership boundary is outside the loaded packets"
+                            } else {
+                                "target bracket is outside the loaded packets"
+                            },
                         ));
                     }
                     interpolator.acc_left =

@@ -528,3 +528,63 @@ fn sample_sessions_reject_empty_recordings_and_selected_ranges_at_completion() {
         );
     }
 }
+
+#[test]
+fn short_resampled_seconds_cut_needs_no_unused_next_ownership_boundary() {
+    use cwa_core::data::{CutConfig, ResampleOptions};
+    let mut bytes = recording(4, 50);
+    // Nonlinear values ensure every interior target still uses original cubic
+    // neighbors, including all context required by this short cut's final target.
+    for sample in 3..13usize {
+        let offset = 1024 + 30 + sample * 6;
+        bytes[offset..offset + 2].copy_from_slice(&((sample.pow(3) * 8) as i16).to_le_bytes());
+    }
+    let options = CwaReadOptions {
+        cut: CutConfig::Seconds {
+            start: Some(0.1),
+            end: Some(0.2),
+        },
+        resample: Some(ResampleOptions::parse(60.0, "cubic").unwrap()),
+        batch: BatchConfig {
+            packet_count: 1,
+            overlap_packets: 0,
+        },
+        ..Default::default()
+    };
+    let mut session = CwaBatchSession::new(bytes.len() as u64, options).unwrap();
+    let mut times = Vec::new();
+    let mut x = Vec::new();
+    while let Some(request) = session.request() {
+        if let Some(batch) = session
+            .provide(&bytes[request.offset as usize..request.offset as usize + request.length])
+            .unwrap()
+        {
+            times.extend(batch.timestamps);
+            x.extend(batch.acc_x);
+        }
+    }
+    assert_eq!(
+        times,
+        vec![
+            1325376000100000,
+            1325376000116666,
+            1325376000133333,
+            1325376000150000,
+            1325376000166666,
+            1325376000183333
+        ]
+    );
+    // Captured from the preserved pre-refactor Python wheel. These nonlinear
+    // targets reject weakening the interior cubic checks to linear interpolation.
+    assert_eq!(
+        x,
+        vec![
+            3.90625,
+            6.2030205726623535,
+            9.259222984313965,
+            13.18359088897705,
+            18.084489822387695,
+            24.070363998413086
+        ]
+    );
+}
