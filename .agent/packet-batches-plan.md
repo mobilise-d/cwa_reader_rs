@@ -230,3 +230,31 @@ immediate baseline to0.819 s after direct raw output; history cleanup measured
 measurement. Borrowed packet/prefix cleanup and direct-File metadata remain in
 progress; all affected native/browser artifacts and results need refresh after
 source stabilizes.
+
+
+## Follow-up acceptance
+
+All five simplicity findings are implemented and their per-commit reviews closed.
+Packet borrowing and real timing-prefix parsing landed in f0d08d9. Final paired
+native Python measurements use CPython 3.13.12, NumPy 2.5.3 and pandas 3.0.6 for
+both versions. Full reads are 0.6898 s versus old 1.2408 s. First/middle/last
+24-hour reads are 0.1847/0.1848/0.1873 s versus 0.6870/0.6879/0.7176 s.
+All 24 paired output fingerprints match exactly. Full peak RSS remains about
+1.5 GiB; daily peak RSS is 433-439 MiB versus 639-642 MiB. Receipts are outside
+the checkout at /tmp/cwa-native-overhead-final-receipt.json and its linked raw
+measurements. These supersede the interim batching regression above.
+
+Direct File metadata landed in 1d7c19b. readMetadataFromFile accepts a File,
+Blob or FileSystemFileHandle, resolves the handle once, and runs the shared
+CwaReader through a FileReaderSync Read+Seek adapter in a short-lived module
+worker. Header/report facades use the same adapter. Sample/CSV iterators also
+accept handles. No whole-input buffering, JavaScript metadata search, MEMFS or
+SharedArrayBuffer is needed. All 18 browser tests and strict TypeScript checks
+pass. A 512 MiB sparse File test obtains native-equivalent metadata and actual
+sample bounds while reading less than 4 KiB.
+
+The final core passes 26 Rust tests, 128 native tests and 31 preserved manifests.
+The clean f0d08d9 Xeus artifact passes 128 worker tests and 25 native comparisons,
+including recovered CSV. Updated packaging, current browser timings, the new
+scope range review from d029904, final CI/artifact inspection and PR delivery
+remain pending. Preserve the earlier final review and all correction commits.

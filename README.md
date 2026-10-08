@@ -41,11 +41,11 @@ The shared Rust parser lives in the [`cwa-core`](crates/cwa-core) crate. The Pyt
 extension and standalone Wasm adapter depend on it. Two browser builds serve
 different callers:
 
-- [Standalone JavaScript/Wasm](docs/standalone-wasm.md) accepts bytes for header
-  preview, full metadata, sampling reports, sample reads, cuts, resampling and
-  CSV export. Its File adapter reads bounded packet batches from a selected
-  local file in a worker, including incremental CSV output. No upload or
-  persistent browser storage is needed.
+- [Standalone JavaScript/Wasm](docs/standalone-wasm.md) accepts bytes, browser
+  Files and file handles. Its File adapter seeks to the required header and
+  metadata ranges and reads samples in bounded packet batches, including cuts,
+  resampling and incremental CSV output. No upload or persistent browser storage
+  is needed.
 - [Xeus-Python](docs/xeus-wasm.md) uses a locally built Emscripten Python extension
   and the existing Python API. The browser must first make the file available in
   the kernel worker's virtual filesystem, then pass its path to the reader.
@@ -58,6 +58,18 @@ packet metadata from both ends for actual sample start and end times.
 interface still requires its supplied input buffer; the File adapter loads only
 requested ranges. Full sample arrays and pandas DataFrames allocate the selected
 output even when input processing uses bounded batches.
+
+For example, read metadata directly from a selected file handle:
+
+```js
+import { readMetadataFromFile } from './pkg/cwa_reader_file.js';
+
+const [handle] = await window.showOpenFilePicker();
+const metadata = await readMetadataFromFile(handle);
+```
+
+The same function accepts a `File` from an HTML file input. It manages a worker
+and uses the core's seek-based metadata reader, as the Python adapter does.
 
 Rust consumers use `CwaReader<R: Read + Seek>` from `cwa-core`. A `Cursor` over
 bytes supports every operation without a temporary file; CSV output accepts any
