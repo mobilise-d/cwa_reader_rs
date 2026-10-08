@@ -35,6 +35,23 @@ uv sync --dev
 
 Because this package contains a Rust extension module built with [maturin](https://www.maturin.rs/), local source installs may require a working Rust toolchain. Install Rust with [rustup](https://rustup.rs/) if your platform does not have a pre-built wheel available.
 
+### Browser builds
+
+The Rust parser is independent of the Python adapter. Two separate browser builds
+serve different callers:
+
+- [Standalone JavaScript/Wasm](docs/standalone-wasm.md) reads header metadata from
+  the first 1,024 bytes of a browser-selected local file. No upload or persistent
+  browser storage is needed.
+- [Xeus-Python](docs/xeus-wasm.md) uses a locally built Emscripten Python extension
+  and the existing Python API. The browser must first make the file available in
+  the kernel worker's virtual filesystem, then pass its path to the reader.
+
+These artifacts have separate build commands and runtime requirements. A desktop
+Python wheel does not work in either browser environment. Header-only parsing
+also differs from `read_metadata()`, which scans data packets for actual sample
+start and end times.
+
 ## Usage
 
 Load a full recording, resample to its configured sampling rate, and convert the
