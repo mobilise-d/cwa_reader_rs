@@ -34,3 +34,28 @@ merely restate manifest fields. Record artifact checksum and exact commands.
 Finish per-commit reviews, review this new scope from the exact base above,
 preserve reviewed commits and corrections, push/update the existing PR, and
 verify the CI artifact. Do not merge or publish.
+
+## Wrapper layout and bundling clarification
+
+The user asked for current online guidance and called the wrapper folder chaotic.
+Research sources: wasm-bindgen/reference/deployment.html at
+https://wasm-bindgen.github.io/wasm-bindgen/reference/deployment.html,
+https://vite.dev/guide/features.html#web-workers,
+https://vite.dev/config/build-options.html#build-assetsinlinelimit,
+https://webpack.js.org/guides/web-workers/ and npm package.json exports/files docs.
+These describe deployment targets, asset/worker handling and package entry points;
+they do not mandate a repository directory tree.
+
+Keep wasm-bindgen web output as native ESM with separate Wasm and module-worker
+assets. Let consuming applications bundle it. Do not add library-mode bundling,
+base64 Wasm, a CommonJS build or a TypeScript migration without a concrete need.
+Vite library mode inlines assets; the installed-tarball production application
+already works without an asset plugin or custom build configuration.
+
+Clean the maintainer layout within the packaging slice: handwritten wrapper,
+declarations, worker and npm README under js/; tooling under scripts/; Rust src/,
+tests/, example/, generated pkg/ and tarball dist/ remain distinct. Keep a real
+top-level build.sh entry if useful, without compatibility forwarding stubs.
+Consolidate packaging helpers where that makes the build easier to follow.
+Update all consumers, commands and CI references and rerun the same source and
+installed-consumer checks after moving files.
