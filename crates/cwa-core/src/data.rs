@@ -2,7 +2,6 @@ use crate::errors::CwaError;
 use crate::packet::{cwa_timestamp, packet_meta, PacketMeta};
 use chrono::{DateTime, Utc};
 use csv::WriterBuilder;
-use std::collections::VecDeque;
 use std::fmt::Write as _;
 
 const MAX_RESAMPLE_HZ: f64 = 10_000.0;
@@ -708,22 +707,19 @@ pub(crate) fn decode_loaded_batch(
                 observed.gyro |= sample.gyro_x.is_some();
                 observed.magnetometer |= sample.mag_x.is_some();
             }
-            source.push((
-                index,
-                timestamp,
-                TimedSample {
-                    time_seconds,
-                    sample,
-                    temperature,
-                    light,
-                    battery,
-                },
-            ));
+            source.push(TimedSample {
+                timestamp_us: timestamp,
+                time_seconds,
+                sample,
+                temperature,
+                light,
+                battery,
+            });
         }
     }
     let mut grid_origin = plan.grid_origin_seconds;
     if let Some(resample) = plan.options.resample {
-        if let Some((_, _, first)) = source.first() {
+        if let Some(first) = source.first() {
             let start = match plan.options.cut {
                 CutConfig::Seconds {
                     start: Some(start), ..
@@ -751,10 +747,10 @@ pub(crate) fn decode_loaded_batch(
                         .checked_add(1)
                         .ok_or("CWA resampling target counter overflow")?;
                 }
-                let last_time = source.last().expect("source present").2.time_seconds;
+                let last_time = source.last().expect("source present").time_seconds;
                 let domain_end = plan.loaded_packets.end >= plan.selected_packets.end;
                 let mut interpolator = LoadedInterpolator {
-                    samples: source.iter().map(|(_, _, sample)| sample.clone()).collect(),
+                    samples: &source,
                     acc_left: 0,
                     result: empty_result(options),
                 };
@@ -790,8 +786,7 @@ pub(crate) fn decode_loaded_batch(
                         }
                         break;
                     }
-                    if left == 0
-                        && first_domain != source.first().map(|(_, timestamp, _)| *timestamp)
+                    if left == 0 && first_domain != source.first().map(|sample| sample.timestamp_us)
                     {
                         return Err(plan.insufficient(
                             crate::errors::ContextSide::Left,
@@ -1000,8 +995,8 @@ struct CsvRowValues {
     battery: Option<f32>,
 }
 
-#[derive(Clone)]
 struct TimedSample {
+    timestamp_us: i64,
     time_seconds: f64,
     sample: SampleData,
     temperature: f32,
@@ -1009,12 +1004,12 @@ struct TimedSample {
     battery: f32,
 }
 
-struct LoadedInterpolator {
-    samples: VecDeque<TimedSample>,
+struct LoadedInterpolator<'a> {
+    samples: &'a [TimedSample],
     acc_left: usize,
     result: CwaDataResult,
 }
-impl LoadedInterpolator {
+impl LoadedInterpolator<'_> {
     fn sample_time(&self, idx: usize) -> f64 {
         self.samples[idx].time_seconds
     }
