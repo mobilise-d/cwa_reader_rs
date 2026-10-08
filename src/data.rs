@@ -5,7 +5,7 @@ use csv::WriterBuilder;
 use std::collections::VecDeque;
 use std::fmt::Write as _;
 use std::fs::File;
-use std::io::{BufWriter, Read, Seek, SeekFrom, Write};
+use std::io::{Read, Seek, SeekFrom, Write};
 
 const MAX_RESAMPLE_HZ: f64 = 10_000.0;
 
@@ -30,7 +30,7 @@ impl Default for CwaParsingOptions {
 }
 
 #[derive(Debug, Clone, Copy)]
-pub struct TimeRangeOptions {
+pub(crate) struct TimeRangeOptions {
     pub start_time_seconds: Option<f64>,
     pub end_time_seconds: Option<f64>,
 }
@@ -106,7 +106,7 @@ impl CutConfig {
 }
 
 #[derive(Debug, Clone, Copy)]
-pub struct ReadPlan {
+pub(crate) struct ReadPlan {
     pub start_block: Option<usize>,
     pub num_blocks: Option<usize>,
     pub time_range: TimeRangeOptions,
@@ -227,23 +227,26 @@ fn cut_to_block_range(cut: CutConfig) -> Result<(Option<usize>, Option<usize>), 
     }
 }
 
-pub fn resolve_read_plan(file_path: &str, cut: CutConfig) -> Result<ReadPlan, CwaError> {
+fn resolve_block_read_plan(cut: CutConfig) -> Result<ReadPlan, CwaError> {
+    let (start_block, num_blocks) = cut_to_block_range(cut)?;
+    Ok(ReadPlan {
+        start_block,
+        num_blocks,
+        time_range: TimeRangeOptions {
+            start_time_seconds: None,
+            end_time_seconds: None,
+        },
+    })
+}
+
+pub(crate) fn resolve_read_plan_from_reader<R: Read + Seek>(
+    reader: &mut R,
+    cut: CutConfig,
+) -> Result<ReadPlan, CwaError> {
     cut.validate()?;
     match cut {
-        CutConfig::Full | CutConfig::Blocks { .. } => {
-            let (start_block, num_blocks) = cut_to_block_range(cut)?;
-            Ok(ReadPlan {
-                start_block,
-                num_blocks,
-                time_range: TimeRangeOptions {
-                    start_time_seconds: None,
-                    end_time_seconds: None,
-                },
-            })
-        }
-        CutConfig::Seconds { start, end } => {
-            resolve_seconds_read_plan(&mut File::open(file_path)?, start, end)
-        }
+        CutConfig::Seconds { start, end } => resolve_seconds_read_plan(reader, start, end),
+        _ => resolve_block_read_plan(cut),
     }
 }
 
@@ -761,8 +764,9 @@ struct SampleData {
     mag_z: Option<f32>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub struct CwaDataResult {
+    /// Integer microseconds in the device clock, or UTC after an explicit fixed offset.
     pub timestamps: Vec<i64>,
     // Store data in columnar format to eliminate first copy
     pub acc_x: Vec<f32>,
@@ -1324,24 +1328,6 @@ pub fn read_cwa_data_from_reader<R: Read + Seek>(
     })
 }
 
-pub fn read_cwa_data_resampled_streaming(
-    file_path: &str,
-    start_block: Option<usize>,
-    num_blocks: Option<usize>,
-    parse_options: CwaParsingOptions,
-    resample_options: ResampleOptions,
-    cut_range: TimeRangeOptions,
-) -> Result<CwaDataResult, CwaError> {
-    read_cwa_data_resampled_from_reader(
-        &mut File::open(file_path)?,
-        start_block,
-        num_blocks,
-        parse_options,
-        resample_options,
-        cut_range,
-    )
-}
-
 pub(crate) fn read_cwa_data_resampled_from_reader<R: Read + Seek>(
     mut file: &mut R,
     start_block: Option<usize>,
@@ -1410,7 +1396,7 @@ pub(crate) fn read_cwa_data_resampled_from_reader<R: Read + Seek>(
     state.into_result()
 }
 
-pub fn filter_data_by_time_range(
+pub(crate) fn filter_data_by_time_range(
     data: CwaDataResult,
     range: TimeRangeOptions,
 ) -> Result<CwaDataResult, CwaError> {
@@ -1721,7 +1707,9 @@ fn write_data_result_csv<W: Write>(
             options,
             channels,
             CsvRowValues {
-                timestamp: data.timestamps[i] - offset_us,
+                timestamp: data.timestamps[i]
+                    .checked_sub(offset_us)
+                    .ok_or("Timestamp overflow after fixed UTC offset")?,
                 acc_x: data.acc_x[i],
                 acc_y: data.acc_y[i],
                 acc_z: data.acc_z[i],
@@ -1759,34 +1747,6 @@ fn scan_sensor_channels<R: Read + Seek>(
     }
     file.seek(SeekFrom::Start(data_block_offset(start_block as u64)?))?;
     Ok(channels)
-}
-
-#[allow(clippy::too_many_arguments)]
-pub fn write_cwa_csv_data(
-    file_path: &str,
-    output_path: &str,
-    start_block: Option<usize>,
-    num_blocks: Option<usize>,
-    options: CwaParsingOptions,
-    resample_options: Option<ResampleOptions>,
-    time_range: TimeRangeOptions,
-    offset_us: i64,
-) -> Result<(), CwaError> {
-    write_cwa_csv_from_reader(
-        &mut File::open(file_path)?,
-        || {
-            Ok(BufWriter::with_capacity(
-                16 * 1024 * 1024,
-                File::create(output_path)?,
-            ))
-        },
-        start_block,
-        num_blocks,
-        options,
-        resample_options,
-        time_range,
-        offset_us,
-    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1873,7 +1833,9 @@ where
                 &options,
                 channels,
                 CsvRowValues {
-                    timestamp: timestamps[i] - offset_us,
+                    timestamp: timestamps[i]
+                        .checked_sub(offset_us)
+                        .ok_or("Timestamp overflow after fixed UTC offset")?,
                     acc_x: sample.acc_x,
                     acc_y: sample.acc_y,
                     acc_z: sample.acc_z,

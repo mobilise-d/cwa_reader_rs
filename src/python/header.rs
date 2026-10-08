@@ -1,6 +1,5 @@
-use crate::header::{
-    format_raw_time, read_cwa_header, scan_data_timing, timestamp_us_to_raw_string,
-};
+use crate::header::{format_raw_time, timestamp_us_to_raw_string};
+use crate::reader::CwaReader;
 use pyo3::prelude::*;
 
 /// Return a sampling consistency report for a CWA file.
@@ -31,55 +30,22 @@ use pyo3::prelude::*;
 /// This method accepts no UTC offset or timezone.
 #[pyfunction]
 pub fn sampling_consistency_report(py: Python, file_path: &str) -> PyResult<Py<PyAny>> {
-    let header = read_cwa_header(file_path)
+    let data = CwaReader::open(file_path)
+        .and_then(|mut reader| reader.sampling_consistency_report())
         .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
-    let data = scan_data_timing(file_path)
-        .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
-
-    let duration_s_from_header = match (
-        header.logging_start_time.as_ref(),
-        header.logging_end_time.as_ref(),
-    ) {
-        (Some(start), Some(end)) => {
-            Some((end.timestamp_micros() - start.timestamp_micros()) as f64 / 1_000_000.0)
-        }
-        _ => None,
-    };
-
-    let duration_s_from_data = match (data.first_sample_us, data.last_sample_us) {
-        (Some(start), Some(end)) => Some((end - start) as f64 / 1_000_000.0),
-        _ => None,
-    };
-
-    let samplingrate_hz_from_data = duration_s_from_data.and_then(|duration| {
-        if data.sample_count > 1 && duration > 0.0 {
-            Some((data.sample_count - 1) as f64 / duration)
-        } else {
-            None
-        }
-    });
 
     let report = pyo3::types::PyDict::new(py);
+    report.set_item("start_from_header_raw", data.start_from_header_raw)?;
+    report.set_item("end_from_header_raw", data.end_from_header_raw)?;
+    report.set_item("duration_s_from_header", data.duration_s_from_header)?;
+    report.set_item("start_from_data_raw", data.start_from_data_raw)?;
+    report.set_item("end_from_data_raw", data.end_from_data_raw)?;
+    report.set_item("duration_s_from_data", data.duration_s_from_data)?;
     report.set_item(
-        "start_from_header_raw",
-        header.logging_start_time.map(format_raw_time),
+        "samplingrate_hz_from_header",
+        data.samplingrate_hz_from_header,
     )?;
-    report.set_item(
-        "end_from_header_raw",
-        header.logging_end_time.map(format_raw_time),
-    )?;
-    report.set_item("duration_s_from_header", duration_s_from_header)?;
-    report.set_item(
-        "start_from_data_raw",
-        data.first_sample_us.and_then(timestamp_us_to_raw_string),
-    )?;
-    report.set_item(
-        "end_from_data_raw",
-        data.last_sample_us.and_then(timestamp_us_to_raw_string),
-    )?;
-    report.set_item("duration_s_from_data", duration_s_from_data)?;
-    report.set_item("samplingrate_hz_from_header", header.sample_rate_hz)?;
-    report.set_item("samplingrate_hz_from_data", samplingrate_hz_from_data)?;
+    report.set_item("samplingrate_hz_from_data", data.samplingrate_hz_from_data)?;
 
     Ok(report.into())
 }
@@ -96,60 +62,56 @@ pub fn sampling_consistency_report(py: Python, file_path: &str) -> PyResult<Py<P
 /// the last clock synchronization; check your configuration software.
 #[pyfunction]
 pub fn read_metadata(py: Python, file_path: &str) -> PyResult<Py<PyAny>> {
-    match read_cwa_header(file_path) {
-        Ok(header) => {
-            let data = scan_data_timing(file_path)
-                .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
-            let header_dict = pyo3::types::PyDict::new(py);
+    let metadata = CwaReader::open(file_path)
+        .and_then(|mut reader| reader.read_metadata())
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
+    let header = metadata.header;
+    let data = metadata.data_timing;
+    let header_dict = pyo3::types::PyDict::new(py);
 
-            // Header identification
-            header_dict.set_item("packet_header", header.packet_header)?;
-            header_dict.set_item("packet_length", header.packet_length)?;
-            header_dict.set_item("hardware_type", header.hardware_type)?;
-            header_dict.set_item("device_id", header.device_id)?;
-            header_dict.set_item("session_id", header.session_id)?;
-            header_dict.set_item("upper_device_id", header.upper_device_id)?;
+    // Header identification
+    header_dict.set_item("packet_header", header.packet_header)?;
+    header_dict.set_item("packet_length", header.packet_length)?;
+    header_dict.set_item("hardware_type", header.hardware_type)?;
+    header_dict.set_item("device_id", header.device_id)?;
+    header_dict.set_item("session_id", header.session_id)?;
+    header_dict.set_item("upper_device_id", header.upper_device_id)?;
 
-            // Timing configuration
-            header_dict.set_item(
-                "logging_start_time_raw",
-                header.logging_start_time.map(format_raw_time),
-            )?;
-            header_dict.set_item(
-                "logging_end_time_raw",
-                header.logging_end_time.map(format_raw_time),
-            )?;
-            header_dict.set_item(
-                "last_change_time_raw",
-                header.last_change_time.map(format_raw_time),
-            )?;
-            header_dict.set_item(
-                "start_from_data_raw",
-                data.first_sample_us.and_then(timestamp_us_to_raw_string),
-            )?;
-            header_dict.set_item(
-                "end_from_data_raw",
-                data.last_sample_us.and_then(timestamp_us_to_raw_string),
-            )?;
+    // Timing configuration
+    header_dict.set_item(
+        "logging_start_time_raw",
+        header.logging_start_time.map(format_raw_time),
+    )?;
+    header_dict.set_item(
+        "logging_end_time_raw",
+        header.logging_end_time.map(format_raw_time),
+    )?;
+    header_dict.set_item(
+        "last_change_time_raw",
+        header.last_change_time.map(format_raw_time),
+    )?;
+    header_dict.set_item(
+        "start_from_data_raw",
+        data.first_sample_us.and_then(timestamp_us_to_raw_string),
+    )?;
+    header_dict.set_item(
+        "end_from_data_raw",
+        data.last_sample_us.and_then(timestamp_us_to_raw_string),
+    )?;
 
-            // Device configuration
-            header_dict.set_item("flash_led", header.flash_led)?;
-            header_dict.set_item("sensor_config", header.sensor_config)?;
-            header_dict.set_item("sample_rate_hz", header.sample_rate_hz)?;
-            header_dict.set_item("accel_range", header.accel_range)?;
-            header_dict.set_item("firmware_revision", header.firmware_revision)?;
+    // Device configuration
+    header_dict.set_item("flash_led", header.flash_led)?;
+    header_dict.set_item("sensor_config", header.sensor_config)?;
+    header_dict.set_item("sample_rate_hz", header.sample_rate_hz)?;
+    header_dict.set_item("accel_range", header.accel_range)?;
+    header_dict.set_item("firmware_revision", header.firmware_revision)?;
 
-            // Metadata
-            header_dict.set_item("annotation", header.annotation)?;
+    // Metadata
+    header_dict.set_item("annotation", header.annotation)?;
 
-            // Parsed sensor configuration (for AX6)
-            header_dict.set_item("gyro_range", header.gyro_range)?;
-            header_dict.set_item("magnetometer_enabled", header.magnetometer_enabled)?;
+    // Parsed sensor configuration (for AX6)
+    header_dict.set_item("gyro_range", header.gyro_range)?;
+    header_dict.set_item("magnetometer_enabled", header.magnetometer_enabled)?;
 
-            Ok(header_dict.into())
-        }
-        Err(e) => Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
-            e.to_string(),
-        )),
-    }
+    Ok(header_dict.into())
 }

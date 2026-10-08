@@ -1,11 +1,11 @@
 use crate::errors;
 use crate::packet::{cwa_timestamp, packet_meta, read_sector};
 use chrono::{DateTime, TimeZone, Utc};
-use serde::Serialize;
+use serde::{Serialize, Serializer};
 use std::fs::File;
 use std::io::{Cursor, Read};
 
-#[derive(Debug, Serialize, Clone)]
+#[derive(Debug, Serialize, Clone, PartialEq)]
 pub struct CwaHeader {
     // Header identification
     pub packet_header: String,
@@ -16,10 +16,22 @@ pub struct CwaHeader {
     pub upper_device_id: u16,
 
     // Timing configuration
+    #[serde(
+        rename = "logging_start_time_raw",
+        serialize_with = "serialize_header_time"
+    )]
     pub logging_start_time: Option<DateTime<Utc>>,
+    #[serde(
+        rename = "logging_end_time_raw",
+        serialize_with = "serialize_header_time"
+    )]
     pub logging_end_time: Option<DateTime<Utc>>,
     // Deprecated
     // pub logging_capacity: u32,
+    #[serde(
+        rename = "last_change_time_raw",
+        serialize_with = "serialize_header_time"
+    )]
     pub last_change_time: Option<DateTime<Utc>>,
 
     // Device configuration
@@ -193,11 +205,32 @@ pub fn read_cwa_header_from_reader<R: Read>(reader: &mut R) -> Result<CwaHeader,
     })
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Serialize, PartialEq)]
 pub struct DataTimingSummary {
+    #[serde(
+        rename = "start_from_data_raw",
+        serialize_with = "serialize_sample_time"
+    )]
     pub first_sample_us: Option<i64>,
+    #[serde(rename = "end_from_data_raw", serialize_with = "serialize_sample_time")]
     pub last_sample_us: Option<i64>,
+    #[serde(skip)]
     pub sample_count: u64,
+}
+
+fn serialize_header_time<S: Serializer>(
+    time: &Option<DateTime<Utc>>,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    time.map(format_raw_time).serialize(serializer)
+}
+
+fn serialize_sample_time<S: Serializer>(
+    time: &Option<i64>,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    time.and_then(timestamp_us_to_raw_string)
+        .serialize(serializer)
 }
 
 pub fn format_raw_time(time: DateTime<Utc>) -> String {

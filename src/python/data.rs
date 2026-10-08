@@ -1,10 +1,10 @@
-use crate::data::{
-    filter_data_by_time_range, read_cwa_data, read_cwa_data_resampled_streaming, resolve_read_plan,
-    write_cwa_csv_data, CutConfig, CwaDataResult, CwaParsingOptions, ResampleOptions,
-};
+use crate::data::{CutConfig, CwaDataResult, CwaParsingOptions, ResampleOptions};
+use crate::reader::{CwaReadOptions, CwaReader};
 use numpy::IntoPyArray;
 use pyo3::prelude::*;
 use pyo3::types::{PyDelta, PyDeltaAccess, PyDict, PyTzInfo};
+use std::fs::File;
+use std::io::BufWriter;
 
 fn get_optional_f64(dict: &Bound<'_, PyDict>, key: &str) -> PyResult<Option<f64>> {
     let Some(value) = dict.get_item(key)? else {
@@ -237,35 +237,17 @@ pub fn read_cwa_file(
 
     let cut = parse_cut_config(cut)?;
     let resample_options = parse_resample_options(resample_hz, resample_method)?;
-    let plan = resolve_read_plan(file_path, cut)
-        .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
     let offset_us = fixed_timezone_offset_us(fixed_utc_offset_timezone)?;
-
-    match if let Some(resample) = resample_options {
-        read_cwa_data_resampled_streaming(
-            file_path,
-            plan.start_block,
-            plan.num_blocks,
-            options,
-            resample,
-            plan.time_range,
-        )
-    } else {
-        read_cwa_data(file_path, plan.start_block, plan.num_blocks, Some(options))
-            .and_then(|data| filter_data_by_time_range(data, plan.time_range))
-    } {
-        Ok(mut data) => {
-            if let Some(offset_us) = offset_us {
-                for timestamp in &mut data.timestamps {
-                    *timestamp -= offset_us;
-                }
-            }
-            create_python_dataframe(py, data, offset_us.is_some())
-        }
-        Err(e) => Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
-            e.to_string(),
-        )),
-    }
+    let options = CwaReadOptions {
+        cut,
+        channels: options,
+        resample: resample_options,
+        fixed_utc_offset_us: offset_us,
+    };
+    let data = CwaReader::open(file_path)
+        .and_then(|mut reader| reader.read_data(&options))
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
+    create_python_dataframe(py, data, offset_us.is_some())
 }
 
 #[pyfunction]
@@ -310,19 +292,23 @@ pub fn write_cwa_csv(
 
     let cut = parse_cut_config(cut)?;
     let resample_options = parse_resample_options(resample_hz, resample_method)?;
-    let plan = resolve_read_plan(file_path, cut)
-        .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
-    let offset_us = fixed_timezone_offset_us(fixed_utc_offset_timezone)?.unwrap_or(0);
-
-    write_cwa_csv_data(
-        file_path,
-        output_path,
-        plan.start_block,
-        plan.num_blocks,
-        options,
-        resample_options,
-        plan.time_range,
-        offset_us,
-    )
-    .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))
+    let options = CwaReadOptions {
+        cut,
+        channels: options,
+        resample: resample_options,
+        fixed_utc_offset_us: fixed_timezone_offset_us(fixed_utc_offset_timezone)?,
+    };
+    CwaReader::open(file_path)
+        .and_then(|mut reader| {
+            reader.write_csv_with(
+                || {
+                    Ok(BufWriter::with_capacity(
+                        16 * 1024 * 1024,
+                        File::create(output_path)?,
+                    ))
+                },
+                &options,
+            )
+        })
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))
 }
