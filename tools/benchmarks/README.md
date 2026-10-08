@@ -80,3 +80,26 @@ python tools/benchmarks/native-syscalls.py /tmp/cwa-bench/native.strace
 These are kernel read/write syscall counts, including short-read retry and EOF
 probes. They do not measure physical disk reads; the OS cache remains enabled.
 The parser handles the single-process `read`, `write` and `lseek` trace above.
+
+The Linux Rust runner measures full decode without DataFrame collection or CSV
+formatting. It immediately drops each decoded batch and counts bytes from actual
+`File::read` calls separately from session range requests. Its peak RSS includes
+all parser allocations; input buffer capacity and largest returned batch are
+reported separately. It has an isolated Cargo workspace and pinned dependency
+lock, so building the benchmark does not alter the Python package workspace.
+
+```sh
+CARGO_TARGET_DIR=/tmp/cwa-bench/native-core-target cargo build --release --locked \
+  --manifest-path tools/benchmarks/native-core/Cargo.toml
+/tmp/cwa-bench/native-core-target/release/cwa-native-benchmark \
+  /private/recording.cwa 256 full
+/tmp/cwa-bench/native-core-target/release/cwa-native-benchmark \
+  /private/recording.cwa 256 middle 60
+```
+
+Use the same packet grid and three fresh process runs per case. Window cases use
+60-second cuts, including their seconds-locator requests. The small boundary metadata
+read used to choose window positions occurs outside timing and counters. Full
+cases include the session header request. Files stay in the warm OS cache. There
+is no equivalent pre-batch bounded decoded-array interface; the old full CSV sink
+and sampling report must be labelled as separate workloads.
