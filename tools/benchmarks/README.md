@@ -18,6 +18,27 @@ packet timing only. They measure different work and must be labelled separately.
 NumPy and pandas imports occur outside operation timing. The native maximum RSS
 includes interpreter/import costs and is a process peak.
 
+For full DataFrame and 24-hour collection on Linux, use the separate collector
+runner. These calls retain all selected output. Check available memory before a
+large full read. Run each command three times in fresh processes:
+
+```sh
+/path/to/reader-env/bin/python tools/benchmarks/native-dataframe.py \
+  /private/recording.cwa --case full --batch-packets 256
+/path/to/reader-env/bin/python tools/benchmarks/native-dataframe.py \
+  /private/recording.cwa --case first-day --batch-packets 256
+/path/to/reader-env/bin/python tools/benchmarks/native-dataframe.py \
+  /private/recording.cwa --case middle-day --batch-packets 256
+/path/to/reader-env/bin/python tools/benchmarks/native-dataframe.py \
+  /private/recording.cwa --case last-day --batch-packets 256
+```
+
+The day cases require at least 24 hours of valid recording. The middle day is
+centered on the recording midpoint; the last day ends at the final valid sample
+time. Timing and `reader_process_peak_rss_bytes` are captured before bounded
+fingerprinting. `total_process_peak_rss_bytes` includes fingerprinting. Neither
+timer includes metadata/imports. Keep fingerprints in private reports.
+
 Prepare the Xeus output with `tools/wasm/build-xeus.sh`, `parity.py` and
 `prepare-runtime.py` as documented in [the Xeus build guide](../../docs/xeus-wasm.md).
 Install Playwright in the runner environment and its Chromium browser. Supply a
