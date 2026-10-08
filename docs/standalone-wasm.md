@@ -44,8 +44,9 @@ npm install /path/to/mobilise-d-cwa-reader-0.4.0.tgz
 
 ```js
 import { readMetadataFromFile, readCwaFileBatches } from '@mobilise-d/cwa-reader';
-import { blocks } from '@mobilise-d/cwa-reader/bytes';
+import init, { blocks } from '@mobilise-d/cwa-reader/bytes';
 
+await init(); // The synchronous cut helpers require main-thread Wasm initialization.
 const metadata = await readMetadataFromFile(fileHandle); // Or File/Blob.
 for await (const samples of readCwaFileBatches(fileHandle, { cut: blocks(3, 10) })) {
   await consumeSamples(samples);
@@ -159,7 +160,9 @@ separate browser source adapter. It drives the same core packet-batch decoder:
 
 ```js
 import { readCwaFileBatches, writeCwaCsvBatches } from './pkg/cwa_reader_file.js';
+import init, { blocks } from './pkg/cwa_reader_browser.js';
 
+await init();
 const controller = new AbortController();
 for await (const data of readCwaFileBatches(file, {
   batchPackets: 256,
