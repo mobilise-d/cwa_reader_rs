@@ -481,3 +481,50 @@ fn seconds_location_crosses_a_long_empty_prefix_without_rereading_it_for_context
     assert_eq!(timestamps.first(), Some(&1_325_376_001_200_000));
     assert_eq!(timestamps.last(), Some(&1_325_376_001_780_000));
 }
+
+#[test]
+fn sample_sessions_reject_empty_recordings_and_selected_ranges_at_completion() {
+    use cwa_core::data::CutConfig;
+    for cut in [
+        CutConfig::Full,
+        CutConfig::Blocks {
+            start: Some(1),
+            end: Some(3),
+        },
+    ] {
+        let mut bytes = recording(4, 50);
+        match cut {
+            CutConfig::Full => bytes[1024..].fill(0),
+            _ => bytes[1024 + 512..1024 + 3 * 512].fill(0),
+        }
+        let mut session = CwaBatchSession::new(
+            bytes.len() as u64,
+            CwaReadOptions {
+                cut,
+                batch: BatchConfig {
+                    packet_count: 1,
+                    overlap_packets: 1,
+                },
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let mut failure = None;
+        while let Some(request) = session.request() {
+            match session
+                .provide(&bytes[request.offset as usize..request.offset as usize + request.length])
+            {
+                Ok(Some(batch)) => assert!(batch.timestamps.is_empty()),
+                Ok(None) => (),
+                Err(error) => {
+                    failure = Some(error.to_string());
+                    break;
+                }
+            }
+        }
+        assert_eq!(
+            failure.as_deref(),
+            Some("No valid sample data found in the specified range")
+        );
+    }
+}

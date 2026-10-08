@@ -196,9 +196,6 @@ impl<R: Read + Seek> CwaReader<R> {
                 data::append_batch(&mut result, batch)?;
             }
         }
-        if result.timestamps.is_empty() {
-            return Err(session.no_output_error());
-        }
         Ok(result)
     }
 }

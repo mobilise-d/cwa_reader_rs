@@ -97,6 +97,7 @@ struct CsvState {
 pub struct CwaBatchSession {
     total_packets: usize,
     first_valid_packet: Option<usize>,
+    emitted_samples: bool,
     descriptor: BatchDescriptor,
     phase: Phase,
     history: VecDeque<(usize, f64)>,
@@ -141,6 +142,7 @@ impl CwaBatchSession {
         Ok(Self {
             total_packets,
             first_valid_packet: None,
+            emitted_samples: false,
             descriptor: BatchDescriptor {
                 loaded_packets,
                 owned_packets,
@@ -235,7 +237,7 @@ impl CwaBatchSession {
     pub fn descriptor(&self) -> Option<&BatchDescriptor> {
         matches!(self.phase, Phase::Payload).then_some(&self.descriptor)
     }
-    pub(crate) fn no_output_error(&self) -> CwaError {
+    fn no_output_error(&self) -> CwaError {
         if self.descriptor.first_domain_sample_us.is_none() {
             return "No valid sample data found in the specified range".into();
         }
@@ -365,6 +367,12 @@ impl CwaBatchSession {
                             self.restart_payload();
                         }
                         return Ok(None);
+                    }
+                }
+                if self.csv.is_none() {
+                    self.emitted_samples |= !result.data.timestamps.is_empty();
+                    if self.finished() && !self.emitted_samples {
+                        return Err(self.no_output_error());
                     }
                 }
                 Ok(Some(result.data))
