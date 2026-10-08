@@ -164,3 +164,30 @@ test('selected File decodes in the example worker and exports a downloadable CSV
   expect(createHash('sha256').update(csv).digest('hex')).toBe(expected.csv_sha256);
   await expect(page.getByRole('status')).toContainText('CSV bytes');
 });
+
+test('an early worker load failure keeps full actions disabled while headers remain usable', async ({ page }) => {
+  let releaseWasm;
+  const wasmGate = new Promise(resolve => { releaseWasm = resolve; });
+  await page.route('**/cwa_reader_browser_bg.wasm', async route => {
+    await wasmGate;
+    await route.continue();
+  });
+  await page.route('**/reader-worker.js', route => route.abort());
+  await page.goto('/', { waitUntil: 'commit' });
+  try {
+    await expect(page.getByRole('status')).toContainText('Recording worker failed to load');
+  } finally {
+    releaseWasm();
+  }
+  const input = page.getByLabel('Select a CWA file');
+  await expect(input).toBeEnabled();
+  for (let selection = 0; selection < 2; ++selection) {
+    await input.setInputFiles(fixture);
+    await expect(page.getByRole('status')).toContainText('Read 1,024 bytes');
+    await expect(page.getByRole('status')).toContainText('Recording worker failed to load');
+    await expect(input).toBeEnabled();
+    for (const name of ['Scan actual timing', 'Read complete recording', 'Export complete CSV']) {
+      await expect(page.getByRole('button', { name })).toBeDisabled();
+    }
+  }
+});

@@ -1,6 +1,10 @@
 import init, { readMetadata, samplingConsistencyReport, readCwaFile, writeCwaCsv } from '/pkg/cwa_reader_browser.js';
 
 const initialized = init();
+initialized.then(
+  () => self.postMessage({ ready: true }),
+  error => self.postMessage({ unavailable: true, error: error.message }),
+);
 self.onmessage = async ({ data: { file, operation } }) => {
   try {
     await initialized;
