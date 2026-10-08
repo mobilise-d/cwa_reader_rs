@@ -7,13 +7,14 @@ import tarfile
 import tempfile
 from pathlib import Path
 
+repo = Path(__file__).resolve().parents[2]
 out = Path(sys.argv[1]).resolve()
 packages = sorted((out / 'channel/emscripten-wasm32').glob('cwa_reader_rs-*.tar.bz2'))
 if not packages:
     raise SystemExit('No built cwa_reader_rs conda artifact')
 manifest = {
-    'source_revision': subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip(),
-    'source_dirty': bool(subprocess.check_output(['git', 'status', '--porcelain'], text=True)),
+    'source_revision': subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=repo, text=True).strip(),
+    'source_dirty': bool(subprocess.check_output(['git', 'status', '--porcelain'], cwd=repo, text=True)),
     'rattler_build': subprocess.check_output(['rattler-build', '--version'], text=True).strip(),
     'artifacts': [],
 }
