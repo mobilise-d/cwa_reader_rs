@@ -156,7 +156,7 @@ not peak live Rust/Python allocations; retained runtime/NumPy/pandas dominate it
 Machine, browser caches and test work affect timing. Regenerate reports for the
 consumer's hardware and realistic file sizes.
 
-The ordinary accelerator-only fixture cannot validate gyro-dependent mobgap
+The ordinary accelerometer-only fixture cannot validate gyro-dependent mobgap
 presets. Synthetic fixtures validate channel handling, but downstream algorithm
 integration with participant metadata and an appropriate real gyro recording
 remains the downstream runtime task.
