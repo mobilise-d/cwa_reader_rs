@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>CWA header preview</title>
+  <style>
+    body { max-width: 52rem; margin: 3rem auto; padding: 0 1rem; font: 1rem/1.5 system-ui, sans-serif; color: #20303b; }
+    h1 { font-size: 1.8rem; }
+    input { margin: .5rem 0 1rem; }
+    pre { padding: 1rem; background: #f2f5f7; border-radius: .5rem; overflow: auto; }
+  </style>
+</head>
+<body>
+  <h1>CWA header preview</h1>
+  <p>Select a recording to inspect its device, session and configured recording settings locally. This page reads only the first 1,024 bytes. It does not upload the file.</p>
+  <label for="file">Select a CWA file</label><br>
+  <input id="file" type="file" accept=".cwa" disabled>
+  <p id="status" role="status">Loading reader...</p>
+  <pre id="metadata" aria-label="Header metadata">No file selected.</pre>
+  <p>The timestamp strings preserve the device clock. They contain no timezone. Header settings do not establish the actual sample start, end or number of samples.</p>
+  <script type="module" src="/inspect.js"></script>
+</body>
+</html>
